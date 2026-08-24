@@ -25,21 +25,25 @@
 
 ## 2. 存储位置与事务写入
 
-默认路径：`~/.hermes/data/gongkao-season-coach/state.json`。
+使用 `scripts/state_store.py resolve-path` 决定唯一主状态。解析顺序为：显式 `--state-path`、环境变量 `GONGKAO_SEASON_COACH_STATE`、唯一已存在状态、跨运行时系统数据目录。系统数据目录为：
 
-用户可显式指定其他路径；一旦选定，把它作为本用户的固定状态源。不得同时维护两个相互竞争的主状态。
+- Windows：`%LOCALAPPDATA%/gongkao-season-coach/state.json`；
+- macOS：`~/Library/Application Support/gongkao-season-coach/state.json`；
+- Linux：`$XDG_DATA_HOME/gongkao-season-coach/state.json`，未设置时使用 `~/.local/share/`。
 
-每次变更执行：
+为兼容旧版，若 `~/.hermes/data/gongkao-season-coach/state.json` 或 `~/.codex/data/gongkao-season-coach/state.json` 中恰有一个已存在，则继续沿用原路径，不自动搬迁。发现两个及以上候选主状态时停止，要求用户明确指定；不得自动选较新文件或合并。
+
+每次变更由状态脚本执行：
 
 1. 读取并解析正式文件；记录当前 `state_revision`。
 2. 完成迁移并生成内存副本，不立即改写正式文件。
-3. 在副本上应用一次完整事件，校验 JSON 和所有不变量。
+3. 在副本上应用一次完整事件，保存为临时候选 JSON，校验全部业务判定。
 4. 若正式文件已经存在，把旧文件复制为同目录 `state.backup.json`；首次创建时跳过备份。
-5. 把新状态写入同目录临时文件；重新读取并确认可解析。
+5. 调用 `commit`，由脚本把候选写入同目录临时文件并重新读取校验。
 6. 原子替换正式文件；再次读取并核对新 revision。
 7. 只有第 6 步成功后才向用户宣告入账、签到、领奖或结算成功。
 
-若执行环境支持文件锁，在“读取 revision”到“原子替换”期间使用独占锁。若保存时发现正式文件 revision 已变化，放弃本次写入、重新读取并重新计算，不做盲目覆盖。
+脚本在“读取 revision”到“原子替换”期间使用跨平台独占锁。若保存时发现正式文件 revision 已变化，返回 `REVISION_CONFLICT`；放弃旧候选、重新读取并重新计算，不做盲目覆盖。
 
 ## 3. 标准状态结构
 
@@ -47,14 +51,15 @@
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "engine": {
-    "ruleset_version": "1.1.0",
+    "ruleset_version": "1.2.0",
     "state_revision": 0,
     "created_at": null,
     "updated_at": null,
     "last_local_date": null,
     "processed_event_ids": [],
+    "migration_history": [],
     "last_error": null
   },
   "profile": {
@@ -71,6 +76,8 @@
     "task_delivery_time": null
   },
   "goal_contract": {
+    "contract_id": null,
+    "campaign_id": null,
     "xingce_target": null,
     "shenlun_target": null,
     "total_target": null,
@@ -78,19 +85,26 @@
     "confirmed_at": null,
     "locked_until": null
   },
+  "goal_contract_history": [],
   "campaign": {
+    "campaign_id": null,
+    "status": "calibrating",
     "started_at": null,
+    "completed_at": null,
     "days_to_exam": null,
     "readiness_status": "calibrating",
     "readiness_percent": null,
     "readiness_components": {},
     "career_best": {}
   },
+  "campaign_history": [],
   "season": {
+    "season_id": null,
+    "campaign_id": null,
     "number": 1,
     "status": "preseason",
     "phase": "calibration",
-    "ruleset_version": "1.1.0",
+    "ruleset_version": "1.2.0",
     "start_date": null,
     "end_date": null,
     "length_days": 7,
@@ -145,21 +159,46 @@
 }
 ```
 
+### 3.1 动态对象的最低字段契约
+
+数组非空时，每个对象至少保存以下字段；允许增加向后兼容字段，但不得改变既有字段含义。所有本赛季事件同时写入 `campaign_id` 与 `season_id`，从而避免跨考试、跨年度混账。
+
+- `catalog[]`：`id`、`subject`、`module`、`name`、`tier`、`status`、`forms`、`thresholds`、`evidence`、`last_tested_at`、`next_review_at`。
+- `catalog[].evidence[]`：`evidence_id`、`campaign_id`、`season_id`、`task_id`、`submission_ref`、`tested_at`、`result`、`forms_supported`。
+- `error_hunts[]`：`error_hunt_id`、`campaign_id`、`season_id`、`subject`、`module`、`mechanism`、`status`、`evidence`、`next_review_at`。
+- `shenlun_portfolio[]`：`portfolio_id`、`campaign_id`、`season_id`、`date`、`task_type`、`prompt_ref`、`submission_ref`、`score`、`score_source`、`dimensions`。
+- `assessments[]`：`assessment_id`、`campaign_id`、`season_id`、`date`、`subject`、`scope`、`ranked`、`conditions`、`score`、`score_source`、`evidence_refs`、`rank_delta`、`ruleset_version`。
+- `review_queue[]`：`review_id`、`campaign_id`、`season_id`、`target_type`、`target_id`、`due_at`、`status`、`source_evidence_id`。
+- `attendance.records[]`：`date`、`campaign_id`、`season_id`、`status`、`counts_as_effective`、`task_id`、`submission_refs`、`recorded_at`。
+- `economy.reward_bundles[]`：`reward_id`、`campaign_id`、`season_id`、`date`、`task_id`、`submission_refs`、五类判定、`ranked`、`rank_delta`、`status`、`created_at`、`revealed_at`。
+- `economy.transactions[]`：`transaction_id`、`campaign_id`、`season_id`、`event_id`、`date`、`type`、`delta`、`balance_after`、`reason`。
+- `task_history[]`：`task_id`、`campaign_id`、`season_id`、`date`、`status`、`locked_conditions`、`submission_refs`、`verification`、`reward_id`。
+- `weekly_settlements[]`：`week_key`、`campaign_id`、`season_id`、`revision`、`period_start`、`period_end`、`metrics`、`reward_ids`、`created_at`。
+- `season_history[]`：`season_id`、`campaign_id`、`number`、`ruleset_version`、`start_date`、`end_date`、`rank`、`stars`、`trophy`、`settled_at`。
+- `campaign_history[]`：`campaign_id`、考试口径、目标契约摘要、起止日期、最终成绩、关联 `season_id` 列表、`completed_at`。
+- `goal_contract_history[]`：`contract_id`、`campaign_id`、完整目标、依据、确认与失效时间。
+- `rule_change_proposals[]`：`proposal_id`、`campaign_id`、`season_id`、`proposed_at`、`reason`、`expected_benefit`、`side_effects`、`decision`、`decided_at`。
+
+`score_source` 只使用：`official`、`institution`、`teacher`、`platform`、`user_self`、`ai_internal`。对象暂时缺少某项事实时写 `null` 或空数组，不发明默认分数、题源或判定。
+
 ## 4. 字段与不变量
 
 保存前必须同时满足：
 
-- `schema_version` 等于 `1.1`。
+- `schema_version` 等于 `1.2`，`engine.ruleset_version` 等于 `1.2.0`。
 - `state_revision` 为非负整数，且每次成功事务只增加 1。
 - `daily_quest.date` 为空或等于它所代表的本地自然日。
+- 当前 campaign 非空时必须有唯一 `campaign_id`；当前 season 必须同时保存相同 `campaign_id` 和唯一 `season_id`。
 - 同一日期最多存在一个 `offer_id`，同一 `task_id` 只能属于一个 offer。
 - 每个已接取任务都保存完整 `locked_conditions`；验证时只读取锁定副本。
 - 每个日期最多一条有效出勤记录和一次每日首胜。
+- `recovery` 是一种出勤状态，必须同时写 `counts_as_effective = true`；`missed` 与 `planned_rest` 必须为 false。
 - 每个 `reward_id` 唯一；同一 `task_id` 最多产生一个最终奖励包。
 - `command_points` 始终位于 0 与 `command_points_cap` 之间；每次变化都有 transaction。
 - 卡片、错因、任务、奖励和结算之间引用的 ID 必须存在。
 - `rank`、`stars` 与排位历史一致；非 ranked 任务的 `rank_delta` 必须为 0。
-- `weekly_settlements` 的 `week_key` 唯一；`season_history` 的 season number 唯一。
+- 规则 1.2 下，`score_source = ai_internal` 的测评无论高低都不得改变 `rank_delta`。
+- `weekly_settlements` 的 `week_key` 唯一；`season_history` 的 `season_id` 唯一；`campaign_history` 的 `campaign_id` 唯一。
 - `readiness_percent` 为空或位于 0–100；数据不足时必须为空并标记 `calibrating`。
 - 时间戳使用带时区的 ISO 8601；自然日使用 `YYYY-MM-DD`。
 
@@ -191,23 +230,27 @@
 2. 把昨日 `daily_quest` 原样归档到 `task_history`；不得覆盖已有相同 task ID 的历史。
 3. 若昨日是计划学习日且没有 effective，记录 `missed`；计划休整日记录 `planned_rest`。
 4. 更新连续出勤、momentum 和到期复习队列。
-5. 创建当天空 `daily_quest`，保留历史和所有永久资产。
-6. 更新 `last_local_date`，检查是否到周结算或赛季结算节点。
+5. 创建当天空 `daily_quest`，把 `attendance.today_status` 重置为 `not_started`，保留历史和所有永久资产。
+6. 按记录重新计算本周 planned、effective 与 rate；自然周变化时不得沿用旧周计数。
+7. 根据 `profile.exam_date` 更新 `campaign.days_to_exam`；只在证据变化时重算备考度。
+8. 更新 `last_local_date`，检查是否到周结算或赛季结算节点。
 
 跨越多天时逐日补齐计划日状态，但不得凭空创建任务或能力结果。只有带日期的可核验记录才能补记历史 effective。
 
 ## 7. 旧版本迁移
 
-加载 `0.1`、`0.1.1` 或 `1.0` 状态时迁移到 `1.1`：
+加载 `0.1`、`0.1.1`、`1.0` 或 `1.1` 状态时，先运行 `scripts/state_store.py migrate` 迁移到 `1.2`：
 
 1. 先保存未经修改的备份。
 2. 保留全部成绩、卡片、形态、错因、出勤、任务、奖励、历史和时间戳。
-3. 添加缺失的 `engine`、`weekly_settlements`、`rule_change_proposals`、economy transactions 与新增 profile 字段。
+3. 添加缺失的 `engine`、`campaign_history`、`goal_contract_history`、`weekly_settlements`、`rule_change_proposals`、economy transactions 与新增 profile 字段。
 4. 把旧 `season.phase = preseason` 映射为 `status = preseason`、`phase = calibration`；正式赛季按日期和历史映射为 `active` 或 `settled`。
-5. 把已有赛季规则标记为其原协议；无法确定时使用 `legacy-1.0`，不得假称由 1.1 规则产生。
-6. 把旧未揭晓奖励的 `status` 统一为 `unrevealed`；保留其原始奖励内容。
-7. 从历史记录重建能够可靠推导的幂等 ID；不能可靠推导时依赖 task/reward 唯一约束，不伪造事件。
-8. 校验不变量，令 revision 增加 1，再原子保存。
+5. 为已有备考周期生成稳定 `campaign_id`，为赛季、目标契约和历史对象补稳定 ID；只补引用，不拆分或合并历史事实。
+6. 把已有赛季规则标记为其原协议；无法确定时使用 `legacy-<schema>`，不得假称由 1.2 规则产生。
+7. 把旧未揭晓奖励的 `status` 统一为 `unrevealed`；保留其原始奖励内容。
+8. 把旧 `recovery` 出勤补为 `counts_as_effective = true`，不额外补发每日首胜。
+9. 从历史记录重建能够可靠推导的幂等 ID；不能可靠推导时依赖 task/reward 唯一约束，不伪造事件。
+10. 校验不变量，令 revision 增加 1，再原子保存。
 
 迁移只改变结构，不追溯改变旧判定、星级、卡片或奖励。
 
@@ -220,10 +263,10 @@
 - 输出一个 `待保存状态块`，至少包含原 revision、event ID、操作类型、完整待写状态或可无歧义重放的变更，以及失败原因。
 - 下一次先比较 revision；未变化时可重试同一事件，已变化时重新读取并合并。
 
-正式文件损坏时，先尝试读取 `state.backup.json`。恢复后明确告知恢复到哪个 revision，以及哪些最后事件可能尚未保存；不得静默补造记录。
+正式文件损坏时，先校验 `state.backup.json`。得到用户明确同意后运行 `scripts/state_store.py recover --event-id <稳定ID>`；脚本必须保留 `state.corrupt.<时间>.json`，恢复后明确告知 revision 与可能尚未保存的最后事件。正式状态仍然有效时，脚本拒绝用旧备份覆盖。
 
 ## 9. 历史保留与压缩
 
-永久保留 season trophies、正式测评、卡片与形态证据、封存错因、申论作品索引、生涯最佳和经济流水。日常原始提交可在跨两个赛季后压缩为摘要，但摘要必须保留 task ID、日期、证据引用、判定、奖励 ID 和来源。
+永久保留 campaign 与 season 历史、目标契约、trophies、正式测评、卡片与形态证据、封存错因、申论作品索引、生涯最佳和经济流水。日常原始提交可在跨两个赛季后压缩为摘要，但摘要必须保留 campaign ID、season ID、task ID、日期、证据引用、判定、奖励 ID 和来源。
 
 状态过大时优先把不可变旧历史归档到同目录、带校验信息的年度文件，并在主状态保留索引。不得为了缩小文件删除尚未到期复测、未揭晓奖励或当前稳定度窗口需要的数据。

@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "profile": {
+    "exam_type": null,
+    "paper_type": null,
+    "target_position": null,
+    "exam_date": null,
+    "timezone": "Asia/Shanghai",
+    "daily_minutes": null,
+    "planned_study_days_per_week": null,
+    "planned_weekdays": [],
+    "task_delivery_mode": "pull",
+    "task_delivery_time": null
+  },
+  "goal_contract": {
+    "xingce_target": null,
+    "shenlun_target": null,
+    "total_target": null,
+    "target_basis": null,
+    "locked_until": null
+  },
+  "campaign": {
+    "started_at": null,
+    "days_to_exam": null,
+    "readiness_percent": 0,
+    "career_best": {}
+  },
+  "season": {
+    "number": 1,
+    "phase": "preseason",
+    "start_date": null,
+    "end_date": null,
+    "length_days": 28,
+    "theme": null,
+    "rank": "未定级",
+    "stars": 0,
+    "locked_catalog_ids": [],
+    "locked_reward_catalog": [],
+    "revenge_quest": null
+  },
+  "catalog": [],
+  "error_hunts": [],
+  "shenlun_portfolio": [],
+  "assessments": [],
+  "review_queue": [],
+  "attendance": {
+    "today_status": "not_started",
+    "momentum_level": 0,
+    "current_effective_streak": 0,
+    "longest_effective_streak": 0,
+    "weekly_planned": 0,
+    "weekly_effective": 0,
+    "weekly_rate": 0,
+    "records": []
+  },
+  "daily_quest": {
+    "date": null,
+    "status": "not_generated",
+    "offer_id": null,
+    "options": [],
+    "accepted_task_id": null,
+    "locked_conditions": null,
+    "submission_refs": [],
+    "verification": null,
+    "reward_bundle_id": null,
+    "rerolls_used": 0
+  },
+  "economy": {
+    "command_points": 0,
+    "command_points_cap": 6,
+    "reward_bundles": []
+  },
+  "task_history": [],
+  "season_history": []
+}

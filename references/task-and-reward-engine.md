@@ -55,6 +55,8 @@ not_generated → offered → accepted → submitted → verified → reward_rea
 {
   "task_id": "YYYY-MM-DD-A-v1",
   "offer_id": "offer:YYYY-MM-DD",
+  "campaign_id": "当前备考周期ID",
+  "season_id": "当前赛季ID",
   "option_version": 1,
   "type": "open|evolve|hunt|review|ranked",
   "subject": "行测|申论",
@@ -164,7 +166,7 @@ candidate_score =
 
 ## 7. 原子结算与奖励包
 
-一次验证事务按顺序计算但一次写入：
+一次验证事务按顺序计算，但只通过 `scripts/state_store.py commit` 写入一次：
 
 1. 检查验证 event ID 与 task/reward 唯一约束。
 2. 写入原始证据引用和五类判定。
@@ -179,6 +181,8 @@ candidate_score =
 ```json
 {
   "reward_id": "reward:<task_id>",
+  "campaign_id": "当前备考周期ID",
+  "season_id": "当前赛季ID",
   "date": "YYYY-MM-DD",
   "task_id": "对应任务",
   "submission_refs": [],
@@ -186,6 +190,7 @@ candidate_score =
   "attendance_awarded": false,
   "ability_changes": [],
   "error_hunt_changes": [],
+  "ranked": false,
   "rank_delta": 0,
   "command_points_delta": 0,
   "set_progress": [],
@@ -229,9 +234,9 @@ candidate_score =
 
 连续漏掉两个计划学习日后，暂停普通三选一，只发 5–15 分钟复归任务。复归任务仍要求实力产物，例如 5 题带订正、一个到期错因复测或一个申论提纲；“打开系统”不算复归。
 
-完成后把当天记为 `recovery` 和 effective，每日首胜照常只发一次，下一计划学习日恢复三选一。不要追债式补做所有漏掉任务，不清空连续之外的任何永久资产。
+完成后把当天出勤状态记为 `recovery`，同时写 `counts_as_effective = true`；每日首胜照常只发一次，下一计划学习日恢复三选一。不要同时写第二条 `effective` 记录，不要追债式补做所有漏掉任务，不清空连续之外的任何永久资产。
 
-计划外精力不足时允许在接取前选择较短选项；接取后若客观中断，保留 started 和证据，下一日重新生成任务，不把未完成部分伪装成通过。
+计划外精力不足时允许在接取前选择较短选项；接取后若客观中断，日期切换时把任务以 `started` 归档，下一日重新生成任务，不把未完成部分伪装成通过。午夜后补交昨日证据时按“补记”处理，必须引用原任务、原始完成日期和可复查材料，不把它并入今日任务。
 
 ## 11. 固定输出模板
 
