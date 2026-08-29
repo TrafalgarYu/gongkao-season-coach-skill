@@ -1,15 +1,41 @@
 # 公考赛季教练
 
-把公务员考试行测与申论备考组织成 14–28 天的游戏化短赛季。它用真实答案、正确率、用时、订正和复测作为能力证据，提供每日三选一任务、能力图鉴、错因追猎、排位、周报和赛季结算。
+把公务员考试行测与申论备考组织成 14–28 天的短赛季。它用真实答案、正确率、用时、订正和复测作为能力证据，提供每日三选一任务、技能总览、错题本、易错点、战绩、申论答题册、段位、勋章墙和赛季结算。
 
-当前版本：规则协议 `1.2.0`，状态结构 `1.2`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在本机。
+当前版本：规则协议 `1.3.0`，状态结构 `1.3`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在本机。
 
 ## 设计边界
 
 - 本 Skill 负责任务编排、状态、验收和反馈，不充当权威题库。
-- 有效出勤、任务完成、能力变化、错因变化和排位变化分别判定。
-- 未校准的 AI 申论内部估分不能增加或扣除排位星。
-- 虚拟奖励必须能追溯到真实学习证据。
+- 有效出勤、任务完成、技能熟练度、错题、易错点和段位分别判定。
+- 未校准的 AI 申论内部估分不能改变段位。
+- 界面只使用“技能、技能熟练度、错题本、易错点、战绩、申论答题册、勋章墙、调整点”等能直接说明用途的名称。
+
+## HTML 备考总览
+
+生成一次当前总览：
+
+```powershell
+python -X utf8 scripts/dashboard.py
+```
+
+默认输出到状态文件同目录的 `dashboard.html`。页面有技能总览、错题本、易错点、战绩、申论答题册和勋章墙六个栏目。技能总览分别显示熟练度检查和近期正确率或得分率；战绩显示模块、科目和综合段位。
+
+保持页面随状态文件更新：
+
+```powershell
+python -X utf8 scripts/dashboard.py --watch
+```
+
+监听脚本检测到状态变化后会重建 HTML，浏览器页面每 15 秒自动刷新。需要指定独立存档时可增加 `--state-path <路径>`。
+
+轻量云服务器建议使用内置只读服务：
+
+```bash
+python scripts/dashboard.py --state-path /srv/gongkao/state.json --serve --host 127.0.0.1 --port 8080
+```
+
+每次访问首页时，服务都会检查状态文件是否变化；浏览器打开后仍每 15 秒刷新。生产环境用 systemd 保持进程常驻，再由 Nginx 配置 HTTPS、密码或其他访问控制。若确实要让脚本直接监听公网，可以把 `--host` 改为 `0.0.0.0`，但不建议在没有访问控制时这样做。
 
 ## 安装
 
@@ -92,9 +118,15 @@ python scripts/state_store.py migrate
 │   ├── state-schema.md
 │   └── task-and-reward-engine.md
 ├── scripts/
+│   ├── dashboard.py
+│   ├── progression.py
 │   ├── state_store.py
 │   └── validate_project.py
-└── tests/test_state_store.py
+└── tests/
+    ├── test_dashboard.py
+    ├── test_progression.py
+    ├── test_state_store.py
+    └── fixtures/state-v1.0.json
 ```
 
 三个 `references` 是同一个 Skill 的条件规则，不是三个独立 Skill。只有能独立触发、独立安装和独立迭代的工作流才应拆成新的 Skill。

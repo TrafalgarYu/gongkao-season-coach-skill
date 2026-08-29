@@ -1,5 +1,11 @@
 """
 版本记录：
+- v1.3.1 / 2026-08-30
+  - 验证技能近期实测快照的指标、百分值与样本字段。
+
+- v1.3.0 / 2026-08-29
+  - 覆盖 1.2 存档迁移，以及错题本、勋章和分层段位字段。
+
 - v1.2.0 / 2026-08-24
   - 覆盖路径解析、初始化、原子提交、幂等、冲突、迁移与恢复。
   - 覆盖永久历史保护、复归语义和 AI 内部估分排位限制。
@@ -25,8 +31,50 @@ class StateStoreTests(unittest.TestCase):
 
         state_store.validate_state(state)
 
-        self.assertEqual(state["schema_version"], "1.2")
-        self.assertEqual(state["engine"]["ruleset_version"], "1.2.0")
+        self.assertEqual(state["schema_version"], "1.3")
+        self.assertEqual(state["engine"]["ruleset_version"], "1.3.0")
+        self.assertEqual(state["goal_contract"]["module_targets"], [])
+        self.assertEqual(state["goal_contract"]["subject_targets"], [])
+        self.assertEqual(state["wrong_answers"], [])
+        self.assertEqual(state["module_rankings"], [])
+        self.assertEqual(state["subject_rankings"], [])
+        self.assertEqual(state["medals"], [])
+
+    def test_v12_migration_adds_progression_collections(self) -> None:
+        old = state_store.default_state(TIMESTAMP)
+        old["schema_version"] = "1.2"
+        old["engine"]["ruleset_version"] = "1.2.0"
+        old["season"]["ruleset_version"] = "1.2.0"
+        old["goal_contract"].pop("module_targets")
+        old["goal_contract"].pop("subject_targets")
+        for key in ("wrong_answers", "module_rankings", "subject_rankings", "medals"):
+            old.pop(key)
+
+        migrated = state_store.migrate_state(old, TIMESTAMP)
+
+        state_store.validate_state(migrated)
+        self.assertEqual(migrated["schema_version"], "1.3")
+        self.assertEqual(migrated["engine"]["ruleset_version"], "1.3.0")
+        self.assertEqual(migrated["season"]["ruleset_version"], "1.2.0")
+        self.assertEqual(migrated["wrong_answers"], [])
+
+    def test_rank_lines_must_be_ordered(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        state["goal_contract"]["module_targets"] = [
+            {
+                "subject": "行测",
+                "module": "资料分析",
+                "metric": "accuracy",
+                "total_points": 20,
+                "floor_value": 80,
+                "target_value": 75,
+                "stretch_value": 90,
+                "time_limit_minutes": 25,
+            }
+        ]
+
+        with self.assertRaisesRegex(state_store.StateError, "保底线"):
+            state_store.validate_state(state)
 
     def test_path_resolution_prefers_single_existing_legacy_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -180,7 +228,7 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
         state_store.validate_state(migrated)
 
-        self.assertEqual(migrated["schema_version"], "1.2")
+        self.assertEqual(migrated["schema_version"], "1.3")
         self.assertEqual(migrated["season"]["status"], "preseason")
         self.assertEqual(migrated["season"]["phase"], "calibration")
         self.assertEqual(migrated["season"]["ruleset_version"], "legacy-1.0")
@@ -188,7 +236,7 @@ class StateStoreTests(unittest.TestCase):
             migrated["engine"]["migration_history"][0]["historical_results_rejudged"]
         )
 
-    def test_ai_internal_score_cannot_change_rank(self) -> None:
+    def test_current_rules_do_not_accept_direct_rank_delta(self) -> None:
         state = state_store.default_state(TIMESTAMP)
         assessment = {
             "assessment_id": "assessment-1",
@@ -203,11 +251,41 @@ class StateStoreTests(unittest.TestCase):
             "rank_delta": 1,
             "score_source": "ai_internal",
             "evidence_refs": [],
-            "ruleset_version": "1.2.0",
+            "ruleset_version": "1.3.0",
         }
         state["assessments"].append(assessment)
 
-        with self.assertRaisesRegex(state_store.StateError, "AI 内部估分"):
+        with self.assertRaisesRegex(state_store.StateError, "滚动战绩"):
+            state_store.validate_state(state)
+
+    def test_skill_recent_performance_is_validated(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        skill = {
+            "id": "skill-1",
+            "subject": "行测",
+            "module": "资料分析",
+            "name": "增长率计算",
+            "tier": "core",
+            "status": "discovered",
+            "forms": {"base": True},
+            "thresholds": {"正确率": "80%"},
+            "evidence": [],
+            "last_tested_at": None,
+            "next_review_at": None,
+            "recent_performance": {
+                "metric": "accuracy",
+                "value": 82.5,
+                "sample_count": 3,
+                "question_count": 42,
+                "window_label": "最近 3 次同口径练习",
+                "updated_at": TIMESTAMP,
+            },
+        }
+        state["catalog"].append(skill)
+        state_store.validate_state(state)
+
+        skill["recent_performance"]["value"] = 101
+        with self.assertRaisesRegex(state_store.StateError, "value 必须位于"):
             state_store.validate_state(state)
 
     def test_recovery_keeps_corrupt_copy_and_restores_valid_backup(self) -> None:

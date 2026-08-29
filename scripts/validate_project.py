@@ -1,5 +1,11 @@
 """
 版本记录：
+- v1.4.0 / 2026-08-29
+  - 校验备考总览、段位计算器及状态结构 1.3 的测试文件。
+
+- v1.3.0 / 2026-08-29
+  - 把 HTML 总览生成器与对应测试加入项目完整性检查。
+
 - v1.2.0 / 2026-08-24
   - 新增零依赖项目校验，覆盖元数据、链接、JSON 示例和版本一致性。
   - 校验文档默认状态与状态脚本的数据结构一致。
@@ -83,7 +89,11 @@ def main() -> int:
         "references/task-and-reward-engine.md",
         "references/assessment-and-season.md",
         "scripts/state_store.py",
+        "scripts/dashboard.py",
+        "scripts/progression.py",
         "tests/test_state_store.py",
+        "tests/test_dashboard.py",
+        "tests/test_progression.py",
         "tests/fixtures/state-v1.0.json",
     )
     for relative in required_paths:

@@ -1,5 +1,15 @@
 """
 版本记录：
+- v1.3.1 / 2026-08-30
+  - 校验技能的可选近期实测快照，区分行测正确率、申论得分率与熟练度检查项。
+
+- v1.3.0 / 2026-08-29
+  - 状态结构升级到 1.3，新增模块目标、错题本、勋章和分层段位记录。
+  - 支持从 1.2 无损迁移，不追溯重判既有技能、成绩或段位。
+
+- v1.2.1 / 2026-08-29
+  - 用户可见错误信息改用“调整点”，内部字段保持兼容。
+
 - v1.2.0 / 2026-08-24
   - 新增 Hermes 与 Codex 共用的状态路径解析。
   - 新增状态初始化、校验、迁移、幂等提交、冲突检测和备份恢复。
@@ -25,8 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "1.2"
-RULESET_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3"
+RULESET_VERSION = "1.3.0"
 STATE_ENV_VAR = "GONGKAO_SEASON_COACH_STATE"
 LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -48,7 +58,7 @@ DAILY_QUEST_STATUSES = {
     "revealed",
 }
 REWARD_STATUSES = {"unrevealed", "revealed"}
-SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1"}
+SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2"}
 
 
 class StateError(RuntimeError):
@@ -65,7 +75,7 @@ def now_iso() -> str:
 
 
 def default_state(timestamp: str | None = None) -> dict[str, Any]:
-    """创建 schema 1.2 的空状态。"""
+    """创建 schema 1.3 的空状态。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": {
@@ -98,6 +108,8 @@ def default_state(timestamp: str | None = None) -> dict[str, Any]:
             "shenlun_target": None,
             "total_target": None,
             "target_basis": None,
+            "module_targets": [],
+            "subject_targets": [],
             "confirmed_at": None,
             "locked_until": None,
         },
@@ -135,9 +147,13 @@ def default_state(timestamp: str | None = None) -> dict[str, Any]:
             "revenge_quest": None,
         },
         "catalog": [],
+        "wrong_answers": [],
         "error_hunts": [],
         "shenlun_portfolio": [],
         "assessments": [],
+        "module_rankings": [],
+        "subject_rankings": [],
+        "medals": [],
         "review_queue": [],
         "attendance": {
             "today_status": "not_started",
@@ -285,7 +301,7 @@ def _fill_item_defaults(items: Any, defaults: Mapping[str, Any]) -> None:
 def migrate_state(
     state: Mapping[str, Any], timestamp: str | None = None
 ) -> dict[str, Any]:
-    """把 0.1–1.1 状态迁移到 1.2，仅补结构，不重判历史。"""
+    """把旧状态迁移到 1.3，仅补结构，不重判历史。"""
     old_version = str(state.get("schema_version", ""))
     if old_version == SCHEMA_VERSION:
         migrated = copy.deepcopy(dict(state))
@@ -368,6 +384,18 @@ def migrate_state(
             "last_tested_at": None,
             "next_review_at": None,
         },
+        "wrong_answers": {
+            "date": None,
+            "subject": None,
+            "module": None,
+            "question_ref": None,
+            "user_answer": None,
+            "correct_answer": None,
+            "error_hunt_id": None,
+            "correction": None,
+            "status": "recorded",
+            "next_review_at": None,
+        },
         "error_hunts": {
             "subject": None,
             "module": None,
@@ -396,6 +424,39 @@ def migrate_state(
             "evidence_refs": [],
             "rank_delta": 0,
             "ruleset_version": f"legacy-{old_version}",
+        },
+        "module_rankings": {
+            "subject": None,
+            "module": None,
+            "metric": None,
+            "stable_value": None,
+            "rank": "未定级",
+            "stars": 0,
+            "next_rank": None,
+            "gap_to_next": None,
+            "sample_size": 0,
+            "assessment_refs": [],
+            "updated_at": None,
+        },
+        "subject_rankings": {
+            "subject": None,
+            "metric": None,
+            "stable_value": None,
+            "rank": "未定级",
+            "stars": 0,
+            "next_rank": None,
+            "gap_to_next": None,
+            "sample_size": 0,
+            "assessment_refs": [],
+            "updated_at": None,
+        },
+        "medals": {
+            "name": None,
+            "description": None,
+            "status": "locked",
+            "condition": {},
+            "evidence_refs": [],
+            "unlocked_at": None,
         },
         "review_queue": {
             "target_type": None,
@@ -458,9 +519,13 @@ def migrate_state(
 
     for collection_name in (
         "catalog",
+        "wrong_answers",
         "error_hunts",
         "shenlun_portfolio",
         "assessments",
+        "module_rankings",
+        "subject_rankings",
+        "medals",
         "review_queue",
         "task_history",
         "weekly_settlements",
@@ -480,9 +545,13 @@ def migrate_state(
 
     id_specs = (
         ("catalog", "id", "card"),
+        ("wrong_answers", "wrong_id", "wrong"),
         ("error_hunts", "error_hunt_id", "error-hunt"),
         ("shenlun_portfolio", "portfolio_id", "portfolio"),
         ("assessments", "assessment_id", "assessment"),
+        ("module_rankings", "ranking_id", "module-ranking"),
+        ("subject_rankings", "ranking_id", "subject-ranking"),
+        ("medals", "medal_id", "medal"),
         ("review_queue", "review_id", "review"),
         ("weekly_settlements", "week_key", "week"),
         ("season_history", "season_id", "season"),
@@ -605,7 +674,7 @@ def _require_item_fields(items: Any, fields: Iterable[str], label: str) -> None:
 
 
 def validate_state(state: Mapping[str, Any]) -> None:
-    """校验 schema 1.2 的关键类型、唯一约束与业务不变量。"""
+    """校验 schema 1.3 的关键类型、唯一约束与业务不变量。"""
     _require_type(state, Mapping, "state")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise StateError(
@@ -626,9 +695,13 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "goal_contract_history",
         "campaign_history",
         "catalog",
+        "wrong_answers",
         "error_hunts",
         "shenlun_portfolio",
         "assessments",
+        "module_rankings",
+        "subject_rankings",
+        "medals",
         "review_queue",
         "weekly_settlements",
         "task_history",
@@ -652,6 +725,21 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "thresholds",
             "evidence",
             "last_tested_at",
+            "next_review_at",
+        ),
+        "wrong_answers": (
+            "wrong_id",
+            "campaign_id",
+            "season_id",
+            "date",
+            "subject",
+            "module",
+            "question_ref",
+            "user_answer",
+            "correct_answer",
+            "error_hunt_id",
+            "correction",
+            "status",
             "next_review_at",
         ),
         "error_hunts": (
@@ -691,6 +779,46 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "evidence_refs",
             "rank_delta",
             "ruleset_version",
+        ),
+        "module_rankings": (
+            "ranking_id",
+            "campaign_id",
+            "season_id",
+            "subject",
+            "module",
+            "metric",
+            "stable_value",
+            "rank",
+            "stars",
+            "next_rank",
+            "gap_to_next",
+            "sample_size",
+            "assessment_refs",
+            "updated_at",
+        ),
+        "subject_rankings": (
+            "ranking_id",
+            "campaign_id",
+            "season_id",
+            "subject",
+            "metric",
+            "stable_value",
+            "rank",
+            "stars",
+            "next_rank",
+            "gap_to_next",
+            "sample_size",
+            "assessment_refs",
+            "updated_at",
+        ),
+        "medals": (
+            "medal_id",
+            "name",
+            "description",
+            "status",
+            "condition",
+            "evidence_refs",
+            "unlocked_at",
         ),
         "review_queue": (
             "review_id",
@@ -767,6 +895,91 @@ def validate_state(state: Mapping[str, Any]) -> None:
     }
     for collection_name, fields in field_contracts.items():
         _require_item_fields(state[collection_name], fields, collection_name)
+
+    module_targets = state["goal_contract"].get("module_targets")
+    _require_type(module_targets, list, "goal_contract.module_targets")
+    _require_item_fields(
+        module_targets,
+        (
+            "subject",
+            "module",
+            "metric",
+            "total_points",
+            "floor_value",
+            "target_value",
+            "stretch_value",
+            "time_limit_minutes",
+        ),
+        "goal_contract.module_targets",
+    )
+    target_keys: list[tuple[Any, Any]] = []
+    for index, target in enumerate(module_targets):
+        subject = target.get("subject")
+        module = target.get("module")
+        if not isinstance(subject, str) or not subject:
+            raise StateError(f"module_targets[{index}].subject 缺失。")
+        if not isinstance(module, str) or not module:
+            raise StateError(f"module_targets[{index}].module 缺失。")
+        target_keys.append((subject, module))
+        values = (
+            target.get("floor_value"),
+            target.get("target_value"),
+            target.get("stretch_value"),
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in values
+        ):
+            raise StateError(f"module_targets[{index}] 三条定级线必须是数字。")
+        floor, goal, stretch = values
+        if not 0 <= floor < goal < stretch <= 100:
+            raise StateError(
+                f"module_targets[{index}] 必须满足 0 ≤ 保底线 < 目标线 < 冲刺线 ≤ 100。"
+            )
+        if target.get("metric") not in {"accuracy", "score_rate"}:
+            raise StateError(f"module_targets[{index}].metric 无效。")
+        for field in ("total_points", "time_limit_minutes"):
+            value = target.get(field)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+            ):
+                raise StateError(f"module_targets[{index}].{field} 无效。")
+    _require_unique(target_keys, "goal_contract.module_targets 科目与模块")
+
+    subject_targets = state["goal_contract"].get("subject_targets")
+    _require_type(subject_targets, list, "goal_contract.subject_targets")
+    _require_item_fields(
+        subject_targets,
+        ("subject", "metric", "floor_value", "target_value", "stretch_value"),
+        "goal_contract.subject_targets",
+    )
+    subjects: list[str] = []
+    for index, target in enumerate(subject_targets):
+        subject = target.get("subject")
+        if not isinstance(subject, str) or not subject:
+            raise StateError(f"subject_targets[{index}].subject 缺失。")
+        subjects.append(subject)
+        values = (
+            target.get("floor_value"),
+            target.get("target_value"),
+            target.get("stretch_value"),
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in values
+        ):
+            raise StateError(f"subject_targets[{index}] 三条定级线必须是数字。")
+        floor, goal, stretch = values
+        if not 0 <= floor < goal < stretch <= 100:
+            raise StateError(
+                f"subject_targets[{index}] 必须满足 "
+                "0 ≤ 保底线 < 目标线 < 冲刺线 ≤ 100。"
+            )
+        if target.get("metric") != "score":
+            raise StateError(f"subject_targets[{index}].metric 必须为 score。")
+    _require_unique(subjects, "goal_contract.subject_targets 科目")
 
     engine = state["engine"]
     revision = engine.get("state_revision")
@@ -917,9 +1130,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
     if any(
         isinstance(value, bool) or not isinstance(value, int) for value in (points, cap)
     ):
-        raise StateError("指挥点与上限必须是整数。")
+        raise StateError("调整点与上限必须是整数。")
     if cap < 0 or not 0 <= points <= cap:
-        raise StateError("指挥点必须位于 0 与上限之间。")
+        raise StateError("调整点必须位于 0 与上限之间。")
 
     task_history_ids = _collection_ids(
         state["task_history"],
@@ -958,12 +1171,18 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "economy.transactions",
     )
     _collection_ids(state["catalog"], "id", "catalog")
-    _collection_ids(state["error_hunts"], "error_hunt_id", "error_hunts")
+    _collection_ids(state["wrong_answers"], "wrong_id", "wrong_answers")
+    error_hunt_ids = _collection_ids(
+        state["error_hunts"], "error_hunt_id", "error_hunts"
+    )
     _collection_ids(
         state["shenlun_portfolio"],
         "portfolio_id",
         "shenlun_portfolio",
     )
+    _collection_ids(state["module_rankings"], "ranking_id", "module_rankings")
+    _collection_ids(state["subject_rankings"], "ranking_id", "subject_rankings")
+    _collection_ids(state["medals"], "medal_id", "medals")
     _collection_ids(state["review_queue"], "review_id", "review_queue")
     _collection_ids(
         state["weekly_settlements"],
@@ -992,17 +1211,155 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "assessment_id",
         "assessments",
     )
+    for index, skill in enumerate(state["catalog"]):
+        performance = skill.get("recent_performance")
+        if performance is None:
+            continue
+        if not isinstance(performance, dict):
+            raise StateError(f"catalog[{index}].recent_performance 必须是对象。")
+        required_fields = {
+            "metric",
+            "value",
+            "sample_count",
+            "question_count",
+            "window_label",
+            "updated_at",
+        }
+        missing = required_fields - performance.keys()
+        if missing:
+            raise StateError(
+                f"catalog[{index}].recent_performance 缺少字段：{sorted(missing)}"
+            )
+        metric = performance.get("metric")
+        if metric not in {"accuracy", "score_rate"}:
+            raise StateError(f"catalog[{index}].recent_performance.metric 无效。")
+        value = performance.get("value")
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= 100
+        ):
+            raise StateError(
+                f"catalog[{index}].recent_performance.value 必须位于 0 至 100。"
+            )
+        for field in ("sample_count", "question_count"):
+            field_value = performance.get(field)
+            if field_value is not None and (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, int)
+                or field_value < 0
+            ):
+                raise StateError(
+                    f"catalog[{index}].recent_performance.{field} 必须是非负整数或 null。"
+                )
+        for field in ("window_label", "updated_at"):
+            field_value = performance.get(field)
+            if field_value is not None and not isinstance(field_value, str):
+                raise StateError(
+                    f"catalog[{index}].recent_performance.{field} 必须是字符串或 null。"
+                )
     for index, assessment in enumerate(state["assessments"]):
         rank_delta = assessment.get("rank_delta", 0)
         if rank_delta and not assessment.get("ranked", False):
             raise StateError(f"assessments[{index}] 非 ranked 但改变了星级。")
-        if (
-            assessment.get("ruleset_version") == RULESET_VERSION
-            and assessment.get("score_source") == "ai_internal"
-            and rank_delta
-        ):
-            raise StateError("1.2 规则下，AI 内部估分不得增加或扣除星级。")
+        if assessment.get("ruleset_version") == RULESET_VERSION and rank_delta:
+            raise StateError("1.3 规则使用滚动战绩计算段位，rank_delta 必须为 0。")
     _require_unique(assessment_ids, "assessments.assessment_id")
+
+    for index, wrong in enumerate(state["wrong_answers"]):
+        if wrong.get("status") not in {
+            "recorded",
+            "corrected",
+            "review_due",
+            "resolved",
+        }:
+            raise StateError(f"wrong_answers[{index}].status 无效。")
+        error_hunt_id = wrong.get("error_hunt_id")
+        if error_hunt_id is not None and error_hunt_id not in error_hunt_ids:
+            raise StateError(
+                f"wrong_answers[{index}].error_hunt_id 引用了不存在的易错点。"
+            )
+    for index, error_hunt in enumerate(state["error_hunts"]):
+        if error_hunt.get("status") not in {
+            "spotted",
+            "identified",
+            "countered",
+            "sealed",
+        }:
+            raise StateError(f"error_hunts[{index}].status 无效。")
+    valid_ranks = {"未定级", "青铜", "白银", "黄金", "钻石", "大师", "王者"}
+    module_ranking_keys: list[tuple[Any, Any]] = []
+    subject_ranking_keys: list[Any] = []
+    for collection_name in ("module_rankings", "subject_rankings"):
+        for index, ranking in enumerate(state[collection_name]):
+            if ranking.get("rank") not in valid_ranks:
+                raise StateError(f"{collection_name}[{index}].rank 无效。")
+            stars = ranking.get("stars")
+            if (
+                isinstance(stars, bool)
+                or not isinstance(stars, int)
+                or not 0 <= stars <= 3
+            ):
+                raise StateError(f"{collection_name}[{index}].stars 必须位于 0 至 3。")
+            if ranking.get("rank") == "未定级" and stars != 0:
+                raise StateError(f"{collection_name}[{index}] 未定级时星数必须为 0。")
+            if ranking.get("rank") != "未定级" and stars == 0:
+                raise StateError(
+                    f"{collection_name}[{index}] 已定级时星数必须为 1 至 3。"
+                )
+            if ranking.get("metric") not in {"accuracy", "score", "score_rate"}:
+                raise StateError(f"{collection_name}[{index}].metric 无效。")
+            next_rank = ranking.get("next_rank")
+            if next_rank is not None and next_rank not in valid_ranks - {"未定级"}:
+                raise StateError(f"{collection_name}[{index}].next_rank 无效。")
+            gap_to_next = ranking.get("gap_to_next")
+            if gap_to_next is not None and (
+                isinstance(gap_to_next, bool)
+                or not isinstance(gap_to_next, (int, float))
+                or gap_to_next < 0
+            ):
+                raise StateError(f"{collection_name}[{index}].gap_to_next 无效。")
+            stable_value = ranking.get("stable_value")
+            if stable_value is not None and (
+                isinstance(stable_value, bool)
+                or not isinstance(stable_value, (int, float))
+                or not 0 <= stable_value <= 100
+            ):
+                raise StateError(
+                    f"{collection_name}[{index}].stable_value 必须位于 0 至 100。"
+                )
+            sample_size = ranking.get("sample_size")
+            if (
+                isinstance(sample_size, bool)
+                or not isinstance(sample_size, int)
+                or sample_size < 0
+            ):
+                raise StateError(
+                    f"{collection_name}[{index}].sample_size 必须是非负整数。"
+                )
+            unknown_assessments = set(ranking.get("assessment_refs", [])) - set(
+                assessment_ids
+            )
+            if unknown_assessments:
+                raise StateError(
+                    f"{collection_name}[{index}] 引用了不存在的战绩："
+                    f"{sorted(unknown_assessments)}"
+                )
+            if collection_name == "module_rankings":
+                module_ranking_keys.append(
+                    (ranking.get("subject"), ranking.get("module"))
+                )
+            else:
+                if ranking.get("subject") not in {"行测", "申论"}:
+                    raise StateError(
+                        f"subject_rankings[{index}].subject 必须为行测或申论。"
+                    )
+                subject_ranking_keys.append(ranking.get("subject"))
+    _require_unique(module_ranking_keys, "module_rankings 科目与模块")
+    _require_unique(subject_ranking_keys, "subject_rankings 科目")
+    for index, medal in enumerate(state["medals"]):
+        if medal.get("status") not in {"locked", "unlocked"}:
+            raise StateError(f"medals[{index}].status 无效。")
 
 
 class FileLock(AbstractContextManager["FileLock"]):
@@ -1013,7 +1370,7 @@ class FileLock(AbstractContextManager["FileLock"]):
         self.timeout = timeout
         self.handle: Any = None
 
-    def __enter__(self) -> FileLock:
+    def __enter__(self) -> FileLock:  # noqa: PYI034 - 保持 Python 3.10 兼容
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.handle = self.path.open("a+b")
         self.handle.seek(0, os.SEEK_END)
@@ -1044,7 +1401,7 @@ class FileLock(AbstractContextManager["FileLock"]):
 
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         if self.handle is None:
             return
         try:
@@ -1161,6 +1518,7 @@ def _ensure_history_preserved(
 ) -> None:
     permanent = (
         (("catalog",), "id"),
+        (("wrong_answers",), "wrong_id"),
         (("error_hunts",), "error_hunt_id"),
         (("shenlun_portfolio",), "portfolio_id"),
         (("assessments",), "assessment_id"),
@@ -1169,6 +1527,7 @@ def _ensure_history_preserved(
         (("season_history",), "season_id"),
         (("campaign_history",), "campaign_id"),
         (("goal_contract_history",), "contract_id"),
+        (("medals",), "medal_id"),
         (("economy", "reward_bundles"), "reward_id"),
         (("economy", "transactions"), "transaction_id"),
     )
@@ -1232,7 +1591,7 @@ def commit_candidate(
 
 
 def migrate_file(state_path: Path, timestamp: str | None = None) -> dict[str, Any]:
-    """备份后把旧结构迁移到 1.2。"""
+    """备份后把旧结构迁移到 1.3。"""
     with FileLock(_lock_path(state_path)):
         current = read_json(state_path)
         if current.get("schema_version") == SCHEMA_VERSION:
