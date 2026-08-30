@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.4.1 / 2026-08-30
+  - 回归覆盖旧版已掌握技能缺少 legacy_status 且未设置门槛时的无损迁移。
 - v1.4.0 / 2026-08-30
   - 覆盖固定技能和勋章目录、申论答题册同步、赛季重定级及旧赛季证据隔离。
 
@@ -517,6 +519,28 @@ class StateStoreTests(unittest.TestCase):
             migrated["daily_quest"]["options"][0]["ruleset_version"],
             "1.3.0",
         )
+
+    def test_v13_migration_marks_owned_skill_without_thresholds_as_legacy(
+        self,
+    ) -> None:
+        old = state_store.default_state(TIMESTAMP)
+        old["schema_version"] = "1.3"
+        old["engine"]["ruleset_version"] = "1.3.0"
+        old["season"]["ruleset_version"] = "1.3.0"
+        skill = next(item for item in old["catalog"] if item["name"] == "翻译推理")
+        skill["status"] = "owned"
+        skill["thresholds"] = {}
+        skill.pop("legacy_status")
+
+        migrated = state_store.migrate_state(old, TIMESTAMP)
+        state_store.validate_state(migrated)
+
+        migrated_skill = next(
+            item for item in migrated["catalog"] if item["name"] == "翻译推理"
+        )
+        self.assertEqual(migrated_skill["status"], "owned")
+        self.assertEqual(migrated_skill["thresholds"], {})
+        self.assertTrue(migrated_skill["legacy_status"])
 
     def test_recovery_keeps_corrupt_copy_and_restores_valid_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

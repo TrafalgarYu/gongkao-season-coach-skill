@@ -1,5 +1,8 @@
 """
 版本记录：
+- v1.4.1 / 2026-08-30
+  - 修复旧版已掌握技能合并固定目录时未获得 legacy_status 豁免的问题。
+  - 保留旧技能的掌握事实，并避免空门槛记录阻断 1.4 状态迁移。
 - v1.4.0 / 2026-08-30
   - 建立 70 项标准技能与 27 枚固定勋章目录。
   - 提供目录合并和勋章进度的确定性计算，供状态迁移与 HTML 共用。
@@ -358,10 +361,11 @@ def merge_default_catalogs(state: dict[str, Any]) -> None:
         item["id"] = default["id"]
         item["tier"] = "standard"
         item.setdefault("needs_retest", False)
-        item.setdefault(
-            "legacy_status",
-            item.get("status") in {"owned", "mastered"} and not item.get("thresholds"),
-        )
+        if "legacy_status" not in current:
+            item["legacy_status"] = item.get("status") in {
+                "owned",
+                "mastered",
+            } and not item.get("thresholds")
         merged_skills.append(item)
         consumed.add(id(current))
     for item in existing_skills:
