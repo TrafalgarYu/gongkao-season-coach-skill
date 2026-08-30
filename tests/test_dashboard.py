@@ -1,5 +1,7 @@
 """
 版本记录：
+- v3.2.0 / 2026-08-31
+  - 验证总览每天 08:00 更新一次，普通访问不重建，手动刷新立即生效。
 - v3.1.0 / 2026-08-30
   - 验证历史考试基线与 AI 内部单题评分使用明确的满分和中文来源。
 - v3.0.0 / 2026-08-30
@@ -18,6 +20,7 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -180,7 +183,7 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", report)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", report)
 
-    def test_server_refreshes_page_and_disables_cache(self) -> None:
+    def test_server_refreshes_daily_at_eight_and_on_manual_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             output_path = Path(temp_dir) / "dashboard.html"
@@ -189,11 +192,13 @@ class DashboardTests(unittest.TestCase):
                 json.dumps(state, ensure_ascii=False),
                 encoding="utf-8",
             )
+            current_time = [datetime.fromisoformat("2026-08-31T07:59:00+08:00")]
             server = dashboard.create_server(
                 state_path,
                 output_path,
                 "127.0.0.1",
                 0,
+                now_provider=lambda: current_time[0],
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -207,6 +212,8 @@ class DashboardTests(unittest.TestCase):
                         "no-store, max-age=0",
                     )
                 self.assertIn("2026-08-30T08:00:00+08:00", first)
+                self.assertNotIn('http-equiv="refresh"', first)
+                self.assertIn('id="manual-refresh"', first)
 
                 state["engine"]["updated_at"] = "2026-08-30T09:30:00+08:00"
                 state_path.write_text(
@@ -214,8 +221,28 @@ class DashboardTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
-                    refreshed = response.read().decode("utf-8")
-                self.assertIn("2026-08-30T09:30:00+08:00", refreshed)
+                    before_eight = response.read().decode("utf-8")
+                self.assertNotIn("2026-08-30T09:30:00+08:00", before_eight)
+
+                current_time[0] = datetime.fromisoformat("2026-08-31T08:00:00+08:00")
+                with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                    daily = response.read().decode("utf-8")
+                self.assertIn("2026-08-30T09:30:00+08:00", daily)
+
+                state["engine"]["updated_at"] = "2026-08-30T10:15:00+08:00"
+                state_path.write_text(
+                    json.dumps(state, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                    same_day = response.read().decode("utf-8")
+                self.assertNotIn("2026-08-30T10:15:00+08:00", same_day)
+
+                with urlopen(
+                    f"http://127.0.0.1:{port}/?refresh=1", timeout=2
+                ) as response:
+                    manual = response.read().decode("utf-8")
+                self.assertIn("2026-08-30T10:15:00+08:00", manual)
                 with self.assertRaises(HTTPError) as error:
                     urlopen(f"http://127.0.0.1:{port}/state.json", timeout=2)
                 self.assertEqual(error.exception.code, 404)

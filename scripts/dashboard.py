@@ -1,5 +1,8 @@
 """
 版本记录：
+- v3.2.0 / 2026-08-31
+  - 移除页面每 15 秒自动重载，常驻服务改为每天 08:00 生成一次快照。
+  - 页面新增手动刷新入口；点击后立即读取最新状态，普通访问不再触发重建。
 - v3.1.0 / 2026-08-30
   - 战绩和申论答题册同时显示原始分数、满分、得分率与中文评分来源。
   - 历史考试基线使用原考试标签，AI 单题评分不再显示成整卷成绩。
@@ -26,11 +29,12 @@ import argparse
 import html
 import json
 import time
+from collections.abc import Callable
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 try:
     from .catalogs import default_medals
@@ -364,7 +368,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     return f"""<!doctype html>
 <html lang="zh-CN"><head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="refresh" content="15"><title>公考备考总览</title>
+  <title>公考备考总览</title>
   <style>
     :root {{ color-scheme:dark; --bg:#08111d; --panel:#111d2b; --line:#26364a;
       --text:#edf5ff; --muted:#91a3b8; --gold:#ffc857; --blue:#4cc9f0; --green:#4ade80; }}
@@ -373,7 +377,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     h1 {{ margin:0; font-size:clamp(30px,5vw,48px) }} h2 {{ margin:26px 0 12px }} h3 {{ margin:2px 0 10px }} .eyebrow,.path,.muted,.meta {{ color:var(--muted) }} .eyebrow,.path {{ margin:0; font-size:12px }} .meta {{ max-width:48%; text-align:right; font-size:12px; overflow-wrap:anywhere }}
     .summary {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:10px 0 }} .summary-label {{ margin:22px 0 2px; color:var(--muted); font-size:12px; letter-spacing:.12em }} .metric,.card,.tabs,.filters,.table-wrap,.empty,.rank-overview,details {{ background:var(--panel); border:1px solid var(--line); border-radius:14px }}
     .metric {{ min-width:0; padding:14px; text-align:left }} .metric:hover,.metric:focus-visible {{ border-color:var(--gold); transform:translateY(-1px) }} .metric strong {{ display:block; color:var(--gold); font-size:25px }} .metric span {{ color:var(--muted); font-size:12px }} .tabs,.filters {{ display:flex; gap:8px; flex-wrap:wrap; padding:10px; margin-bottom:16px }}
-    button,input {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624; font:inherit }} button {{ cursor:pointer }} button.active {{ color:var(--gold); border-color:var(--gold) }} input {{ flex:1; min-width:210px }}
+    button,input {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624; font:inherit }} button {{ cursor:pointer }} button.active {{ color:var(--gold); border-color:var(--gold) }} input {{ flex:1; min-width:210px }} .manual-refresh {{ margin-top:7px; color:var(--gold); border-color:#78622f }}
     .grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:13px }} .card {{ padding:16px; position:relative; overflow:hidden }} .card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start }} .status {{ padding:3px 8px; border-radius:99px; background:#1c2b3d; white-space:nowrap; font-size:12px }}
     .status-mastered {{ color:var(--gold) }} .status-owned {{ color:var(--green) }} .status-discovered {{ color:var(--blue) }} .progress {{ height:7px; background:#26364a; border-radius:99px; overflow:hidden }} .progress i {{ display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--green)) }}
     .skill-performance {{ display:flex; justify-content:space-between; gap:12px; align-items:end; margin:12px 0; padding:10px 12px; background:#0b1624; border-left:3px solid var(--gold); border-radius:3px 9px 9px 3px }} .skill-performance span {{ display:block; color:var(--muted); font-size:11px }} .skill-performance strong {{ color:var(--gold); font-size:22px; line-height:1.2 }} .skill-performance p {{ margin:0; color:var(--muted); font-size:12px; text-align:right }}
@@ -384,7 +388,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
   </style>
 </head><body><main>
   <header><div><p class="eyebrow">GONGKAO SEASON · 第 {_escape(season.get("number", 1))} 赛季</p><h1>备考总览</h1></div>
-    <div class="meta">数据更新：{_escape(updated_at)}<br>页面生成：{_escape(generated_at)}<br>数据文件：{_escape(source_path)}</div></header>
+    <div class="meta">数据更新：{_escape(updated_at)}<br>页面生成：{_escape(generated_at)}<br>每天 08:00 自动刷新<br><button id="manual-refresh" class="manual-refresh" type="button">手动刷新</button><br>数据文件：{_escape(source_path)}</div></header>
   <p class="summary-label">技能全貌</p><section class="summary">
     <button class="metric jump" data-tab="skills" data-filter="all"><strong>{total}</strong><span>技能总数</span></button>
     <button class="metric jump" data-tab="skills" data-filter="mastered"><strong>{counts["mastered"]}</strong><span>稳定掌握</span></button>
@@ -427,6 +431,10 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
   document.querySelectorAll('.jump').forEach(button=>button.addEventListener('click',()=>{{openTab(button.dataset.tab);if(button.dataset.filter)setSkillFilter(button.dataset.filter);document.querySelector('.tabs').scrollIntoView({{behavior:'smooth'}});}}));
   const medalCards=[...document.querySelectorAll('.medal')]; const medalFilters=[...document.querySelectorAll('.medal-filter')];
   medalFilters.forEach(button=>button.addEventListener('click',()=>{{const value=button.dataset.medalFilter;medalFilters.forEach(x=>x.classList.toggle('active',x===button));medalCards.forEach(card=>card.hidden=value!=='all'&&card.dataset.medalStatus!==value);}}));
+  function requestRefresh(){{window.location.search='refresh=1';}}
+  document.querySelector('#manual-refresh').addEventListener('click',requestRefresh);
+  const nextRefresh=new Date(); nextRefresh.setHours(8,0,0,0); if(nextRefresh<=new Date())nextRefresh.setDate(nextRefresh.getDate()+1);
+  setTimeout(requestRefresh,nextRefresh-new Date());
 </script></body></html>"""
 
 
@@ -448,30 +456,51 @@ def watch_report(state_path: Path, output_path: Path, interval: float) -> None:
 
 
 def create_server(
-    state_path: Path, output_path: Path, host: str, port: int
+    state_path: Path,
+    output_path: Path,
+    host: str,
+    port: int,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> HTTPServer:
-    """创建只读总览服务；请求首页时按需重建已变化的页面。"""
-    previous_mtime: int | None = None
+    """创建只读总览服务；每天 08:00 或用户明确要求时重建页面。"""
+    current_time = now_provider or (lambda: datetime.now().astimezone())
+    last_daily_refresh: str | None = None
 
-    def refresh() -> None:
-        nonlocal previous_mtime
-        current_mtime = state_path.stat().st_mtime_ns
-        if current_mtime != previous_mtime:
+    def refresh(*, force: bool = False) -> None:
+        nonlocal last_daily_refresh
+        now = current_time()
+        today = now.date().isoformat()
+        daily_refresh_due = (now.hour, now.minute) >= (8, 0)
+        if (
+            force
+            or not output_path.exists()
+            or (daily_refresh_due and last_daily_refresh != today)
+        ):
             build_report(state_path, output_path)
-            previous_mtime = current_mtime
+            if daily_refresh_due:
+                last_daily_refresh = today
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def _send_dashboard(self, *, include_body: bool) -> None:
-            request_path = urlsplit(self.path).path
+            request = urlsplit(self.path)
+            request_path = request.path
             if request_path not in {"/", f"/{quote(output_path.name)}"}:
                 self.send_error(404, "Not Found")
                 return
+            manual_refresh = parse_qs(request.query).get("refresh") == ["1"]
             try:
-                refresh()
+                refresh(force=manual_refresh)
                 content = output_path.read_bytes()
             except (OSError, StateError, ValueError) as exc:
                 self.log_error("dashboard refresh failed: %s", exc)
                 self.send_error(500, "Dashboard Update Failed")
+                return
+            if manual_refresh:
+                self.send_response(303)
+                self.send_header("Location", request_path)
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -491,7 +520,7 @@ def create_server(
         def log_message(self, format: str, *args: object) -> None:
             return
 
-    refresh()
+    refresh(force=True)
     return HTTPServer((host, port), DashboardHandler)
 
 
