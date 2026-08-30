@@ -1,5 +1,7 @@
 # 状态、迁移与持久化规范
 
+当前状态结构：`1.5`；当前规则协议：`1.5.0`。
+
 本文件是所有动态学习事实的唯一数据规范。凡涉及读取、创建、修改、迁移、恢复或保存状态，必须完整读取本文件。
 
 ## 目录
@@ -53,9 +55,9 @@
 
 ```json
 {
-  "schema_version": "1.4",
+  "schema_version": "1.5",
   "engine": {
-    "ruleset_version": "1.4.0",
+    "ruleset_version": "1.5.0",
     "state_revision": 0,
     "created_at": null,
     "updated_at": null,
@@ -108,7 +110,7 @@
     "number": 1,
     "status": "preseason",
     "phase": "calibration",
-    "ruleset_version": "1.4.0",
+    "ruleset_version": "1.5.0",
     "start_date": null,
     "end_date": null,
     "length_days": 7,
@@ -190,8 +192,8 @@
 - `goal_contract.subject_targets[]`：`subject`、`metric`、`floor_value`、`target_value`、`stretch_value`。
 - `wrong_answers[]`：`wrong_id`、`campaign_id`、`season_id`、`date`、`subject`、`module`、`question_ref`、`user_answer`、`correct_answer`、`error_hunt_id`、`correction`、`status`、`next_review_at`。
 - `error_hunts[]`：`error_hunt_id`、`campaign_id`、`season_id`、`subject`、`module`、`mechanism`、`status`、`evidence`、`next_review_at`。
-- `shenlun_portfolio[]`：`portfolio_id`、`campaign_id`、`season_id`、`date`、`task_type`、`prompt_ref`、`submission_ref`、`score`、`score_source`、`dimensions`、`answer_text`、`feedback`、`word_count`、`time_minutes`。
-- `assessments[]`：`assessment_id`、`campaign_id`、`season_id`、`date`、`subject`、`scope`、`ranked`、`conditions`、`score`、`score_source`、`evidence_refs`、`rank_delta`、`ruleset_version`。
+- `shenlun_portfolio[]`：`portfolio_id`、`campaign_id`、`season_id`、`date`、`task_type`、`prompt_ref`、`submission_ref`、`score`、`score_max`、`score_rate`、`normalization_status`、`score_source`、`dimensions`、`answer_text`、`feedback`、`word_count`、`time_minutes`。
+- `assessments[]`：`assessment_id`、`campaign_id`、`season_id`、`date`、`subject`、`scope`、`ranked`、`conditions`、`score`、`score_max`、`score_rate`、`normalization_status`、`score_source`、`evidence_refs`、`rank_delta`、`ruleset_version`。
 - `module_rankings[]`：`ranking_id`、`campaign_id`、`season_id`、`subject`、`module`、`metric`、`stable_value`、`rank`、`stars`、`next_rank`、`gap_to_next`、`sample_size`、`assessment_refs`、`updated_at`。
 - `subject_rankings[]`：`ranking_id`、`campaign_id`、`season_id`、`subject`、`metric`、`stable_value`、`rank`、`stars`、`next_rank`、`gap_to_next`、`sample_size`、`assessment_refs`、`updated_at`。
 - `medals[]`：`medal_id`、`name`、`category`、`description`、`status`、`condition`、`progress_current`、`progress_target`、`progress_unit`、`evidence_refs`、`unlocked_at`。
@@ -208,11 +210,13 @@
 
 `score_source` 只使用：`official`、`institution`、`teacher`、`platform`、`user_self`、`ai_internal`。对象暂时缺少某项事实时写 `null` 或空数组，不发明默认分数、题源或判定。
 
+`score` 保存原始得分，`score_max` 保存满分，`score_rate` 保存按 `score / score_max × 100` 计算的得分率。`normalization_status` 只允许 `exact`、`needs_review`、`not_scored`。新记录只允许 `exact` 或 `not_scored`；旧记录无法确认满分时保留原始分数并标为 `needs_review`，不参与比较或段位。
+
 ## 4. 字段与不变量
 
 保存前必须同时满足：
 
-- `schema_version` 等于 `1.4`，`engine.ruleset_version` 等于 `1.4.0`。
+- `schema_version` 等于 `1.5`，`engine.ruleset_version` 等于 `1.5.0`。
 - 模块三条线必须满足 `0 ≤ 保底线 < 目标线 < 冲刺线 ≤ 100`；同一科目与模块只能有一组锁定目标。
 - 段位只允许未定级、青铜、白银、黄金、钻石、大师、王者；未定级时星数为 0，其他段位为 1–3 星。
 - `state_revision` 为非负整数，且每次成功事务只增加 1。
@@ -226,10 +230,10 @@
 - `command_points` 始终位于 0 与 `command_points_cap` 之间；每次变化都有 transaction。
 - 技能、错题、易错点、任务、奖励和结算之间引用的 ID 必须存在。
 - 技能近期实测的 `sample_count`、`question_count` 为非负整数或 `null`；缺少实测时不得用熟练度检查项完成比例代替正确率或得分率。
-- 1.4 规则下段位由本赛季战绩重算，新增 `assessments[].rank_delta` 必须为 0；旧协议的历史值原样保留。
-- 规则 1.4 下，`score_source = ai_internal` 的申论估分无论高低都不得单独完成定级。
-- `catalog` 必须包含 70 项标准技能，允许额外保留 `tier = custom` 的自定义技能。`medals` 必须包含 27 枚固定勋章；旧版本已有的非固定勋章按“历史”分类保留，不进入 `x/27` 进度。
-- 1.4 新任务的每个候选项必须用 `medal_targets` 指向至少一枚未点亮勋章；全部勋章点亮后可为空。
+- 1.5 规则下段位由本赛季战绩重算，新增 `assessments[].rank_delta` 必须为 0；旧协议的历史值原样保留。
+- 规则 1.5 下，`score_source = ai_internal` 的申论估分无论高低都不得单独完成定级。
+- `catalog` 必须恰好包含 `skill-01` 至 `skill-70`，全部为 `tier = standard`；新任务不得创建自定义技能。
+- 1.5 新任务的每个候选项必须用 `medal_targets` 指向至少一枚未点亮勋章；全部勋章点亮后可为空。
 - 已验证申论任务的每个 `submission_ref` 必须存在唯一 `portfolio:<submission_ref>`，验证结果同时保存 `portfolio_changes`。
 - `weekly_settlements` 的 `week_key` 唯一；`season_history` 的 `season_id` 唯一；`campaign_history` 的 `campaign_id` 唯一。
 - `readiness_percent` 为空或位于 0–100；数据不足时必须为空并标记 `calibrating`。
@@ -272,20 +276,22 @@
 
 ## 7. 旧版本迁移
 
-加载 `0.1`、`0.1.1`、`1.0`、`1.1`、`1.2` 或 `1.3` 状态时，先运行 `scripts/state_store.py migrate` 迁移到 `1.4`：
+加载 `0.1`、`0.1.1`、`1.0`、`1.1`、`1.2`、`1.3` 或 `1.4` 状态时，先运行 `scripts/state_store.py migrate --dry-run`，核对报告后运行 `migrate` 迁移到 `1.5`：
 
 1. 先保存未经修改的备份。
 2. 保留全部技能、错题、易错点、战绩、申论作答、出勤、奖励、历史和时间戳。
 3. 添加缺失的 `engine`、`campaign_history`、`goal_contract_history`、`weekly_settlements`、`rule_change_proposals`、economy transactions 与新增 profile 字段。
 4. 把旧 `season.phase = preseason` 映射为 `status = preseason`、`phase = calibration`；正式赛季按日期和历史映射为 `active` 或 `settled`。
 5. 为已有备考周期生成稳定 `campaign_id`，为赛季、目标契约和历史对象补稳定 ID；只补引用，不拆分或合并历史事实。
-6. 把已有赛季规则标记为其原协议；无法确定时使用 `legacy-<schema>`，不得假称由 1.4 规则产生。
+6. 把已有赛季规则标记为其原协议；无法确定时使用 `legacy-<schema>`，不得假称由 1.5 规则产生。
 7. 把旧未揭晓奖励的 `status` 统一为 `unrevealed`；保留其原始奖励内容。
 8. 把旧 `recovery` 出勤补为 `counts_as_effective = true`，不额外补发每日首胜。
 9. 从历史记录重建能够可靠推导的幂等 ID；不能可靠推导时依赖 task/reward 唯一约束，不伪造事件。
 10. 校验不变量，令 revision 增加 1，再原子保存。
 
-迁移不追溯改变旧熟练度、段位或奖励。1.4 会补齐固定技能与勋章目录，并只依据已有可信证据点亮符合条件的固定勋章；缺失证据时保持灰色。历史申论仅在能够确认科目、提交引用和作答原文时补建答题册，无法确认的引用写入迁移报告。
+1.5 数据修复会把旧版同义技能的证据并入固定技能，把仅有基础练习的错误“考场可用”状态纠正为“练习中”，并从活动目录移除已经完成映射的自定义技能。它不会补发奖励或段位。无法映射的自定义技能会阻止迁移并出现在报告中，不静默删除。
+
+旧版同时保存行测、申论和总分的复合考试记录拆成两条单科历史基线，原总分和来源放入迁移条件；旧版 AI 百分制单题评分补为 `score_max = 100` 和明确得分率。无法确认口径的成绩保留原始分数并标记 `needs_review`。历史申论仅在能够确认科目、提交引用和作答原文时补建答题册，无法确认的引用写入迁移报告。
 
 ## 8. 写入失败与恢复
 

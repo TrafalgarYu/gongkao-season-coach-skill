@@ -1,5 +1,9 @@
 """
 版本记录：
+- v1.5.0 / 2026-08-30
+  - 将旧版复合考试成绩、申论单题评分和自定义技能迁移为统一格式。
+  - 增加迁移 dry-run，固定活动技能目录为 70 项，并校验评分满分与得分率。
+  - 禁止基础练习直接成为考场可用，移除活动状态中的旧版熟练度豁免。
 - v1.4.0 / 2026-08-30
   - 状态结构升级到 1.4，初始化 70 项技能和 27 枚固定勋章。
   - 修复申论验证未同步写入答题册，并增加跨记录一致性校验。
@@ -60,8 +64,13 @@ try:
 except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
     from rankings import refresh_rankings
 
-SCHEMA_VERSION = "1.4"
-RULESET_VERSION = "1.4.0"
+try:
+    from scripts.normalization import normalize_legacy_state
+except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
+    from normalization import normalize_legacy_state
+
+SCHEMA_VERSION = "1.5"
+RULESET_VERSION = "1.5.0"
 STATE_ENV_VAR = "GONGKAO_SEASON_COACH_STATE"
 LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -83,7 +92,7 @@ DAILY_QUEST_STATUSES = {
     "revealed",
 }
 REWARD_STATUSES = {"unrevealed", "revealed"}
-SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2", "1.3"}
+SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2", "1.3", "1.4"}
 
 
 class StateError(RuntimeError):
@@ -100,7 +109,7 @@ def now_iso() -> str:
 
 
 def default_state(timestamp: str | None = None) -> dict[str, Any]:
-    """创建 schema 1.4 的空状态。"""
+    """创建 schema 1.5 的空状态。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": {
@@ -338,7 +347,7 @@ def _fill_item_defaults(items: Any, defaults: Mapping[str, Any]) -> None:
 def migrate_state(
     state: Mapping[str, Any], timestamp: str | None = None
 ) -> dict[str, Any]:
-    """把旧状态迁移到 1.4，保留历史事实并补齐固定目录。"""
+    """把旧状态迁移到 1.5，保留历史事实并规范技能与评分口径。"""
     old_version = str(state.get("schema_version", ""))
     if old_version == SCHEMA_VERSION:
         migrated = copy.deepcopy(dict(state))
@@ -465,6 +474,9 @@ def migrate_state(
             "prompt_ref": None,
             "submission_ref": None,
             "score": None,
+            "score_max": None,
+            "score_rate": None,
+            "normalization_status": "not_scored",
             "score_source": None,
             "dimensions": {},
             "answer_text": None,
@@ -479,6 +491,9 @@ def migrate_state(
             "ranked": False,
             "conditions": {},
             "score": None,
+            "score_max": None,
+            "score_rate": None,
+            "normalization_status": "not_scored",
             "score_source": None,
             "evidence_refs": [],
             "rank_delta": 0,
@@ -672,6 +687,12 @@ def migrate_state(
     migration_time = timestamp or now_iso()
     merge_default_catalogs(migrated)
     repaired, unresolved = _sync_shenlun_portfolio(migrated, strict=False)
+    normalization = normalize_legacy_state(migrated)
+    unresolved_custom = normalization["skills"]["unresolved_custom_skill_ids"]
+    if unresolved_custom:
+        raise StateError(
+            f"旧技能无法映射到固定目录，请先明确对应关系：{unresolved_custom}"
+        )
     refresh_medals(migrated, migration_time)
     engine["migration_history"].append(
         {
@@ -682,6 +703,7 @@ def migrate_state(
             "previous_season_ruleset": previous_season_ruleset,
             "shenlun_portfolio_repaired": repaired,
             "shenlun_portfolio_unresolved": unresolved,
+            "normalization": normalization,
         }
     )
     return migrated
@@ -702,6 +724,18 @@ def _verified_shenlun_tasks(state: Mapping[str, Any]) -> list[Mapping[str, Any]]
         and item.get("verification")
         and item.get("submission_refs")
     ]
+
+
+def _calculate_score_rate(score: Any, score_max: Any) -> float | None:
+    if (
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or isinstance(score_max, bool)
+        or not isinstance(score_max, (int, float))
+        or score_max <= 0
+    ):
+        return None
+    return round(score / score_max * 100, 2)
 
 
 def _sync_shenlun_portfolio(
@@ -745,6 +779,20 @@ def _sync_shenlun_portfolio(
                     "prompt_ref": locked.get("prompt_ref"),
                     "submission_ref": submission_ref,
                     "score": verification.get("score"),
+                    "score_max": verification.get("score_max"),
+                    "score_rate": _calculate_score_rate(
+                        verification.get("score"), verification.get("score_max")
+                    ),
+                    "normalization_status": (
+                        "exact"
+                        if _calculate_score_rate(
+                            verification.get("score"), verification.get("score_max")
+                        )
+                        is not None
+                        else "not_scored"
+                        if verification.get("score") is None
+                        else "needs_review"
+                    ),
                     "score_source": verification.get("score_source"),
                     "dimensions": copy.deepcopy(verification.get("dimensions", {})),
                     "answer_text": answer_text,
@@ -762,11 +810,21 @@ def _sync_shenlun_portfolio(
                     "word_count",
                     "time_minutes",
                     "score",
+                    "score_max",
                     "score_source",
                     "dimensions",
                 ):
                     if verification.get(key) is not None:
                         item[key] = copy.deepcopy(verification[key])
+            rate = _calculate_score_rate(item.get("score"), item.get("score_max"))
+            item["score_rate"] = rate
+            item["normalization_status"] = (
+                "exact"
+                if rate is not None
+                else "not_scored"
+                if item.get("score") is None
+                else "needs_review"
+            )
             if isinstance(task.get("verification"), dict):
                 changes = task["verification"].setdefault("portfolio_changes", [])
                 if item["portfolio_id"] not in changes:
@@ -941,8 +999,39 @@ def _require_item_fields(items: Any, fields: Iterable[str], label: str) -> None:
             raise StateError(f"{label}[{index}] 缺少字段：{missing}")
 
 
+def _validate_score_fields(item: Mapping[str, Any], label: str) -> None:
+    status = item.get("normalization_status")
+    if status not in {"exact", "needs_review", "not_scored"}:
+        raise StateError(f"{label}.normalization_status 无效。")
+    score = item.get("score")
+    score_max = item.get("score_max")
+    score_rate = item.get("score_rate")
+    for field, value in (
+        ("score", score),
+        ("score_max", score_max),
+        ("score_rate", score_rate),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise StateError(f"{label}.{field} 必须是数字或 null。")
+    if status == "not_scored":
+        if score is not None or score_max is not None or score_rate is not None:
+            raise StateError(f"{label} 未评分时不得保存分数。")
+        return
+    if status == "needs_review":
+        if score is None or score_max is not None or score_rate is not None:
+            raise StateError(f"{label} 待确认口径只能保留原始分数。")
+        return
+    expected_rate = _calculate_score_rate(score, score_max)
+    if expected_rate is None or score is None or score < 0 or score > score_max:
+        raise StateError(f"{label} 缺少有效的原始分数或满分。")
+    if score_rate is None or abs(score_rate - expected_rate) > 0.01:
+        raise StateError(f"{label}.score_rate 与原始分数、满分不一致。")
+
+
 def validate_state(state: Mapping[str, Any]) -> None:
-    """校验 schema 1.4 的关键类型、唯一约束与业务不变量。"""
+    """校验 schema 1.5 的关键类型、唯一约束与业务不变量。"""
     _require_type(state, Mapping, "state")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise StateError(
@@ -1030,6 +1119,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "prompt_ref",
             "submission_ref",
             "score",
+            "score_max",
+            "score_rate",
+            "normalization_status",
             "score_source",
             "dimensions",
             "answer_text",
@@ -1047,6 +1139,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "ranked",
             "conditions",
             "score",
+            "score_max",
+            "score_rate",
+            "normalization_status",
             "score_source",
             "evidence_refs",
             "rank_delta",
@@ -1345,6 +1440,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
     if quest.get("status") not in DAILY_QUEST_STATUSES:
         raise StateError("daily_quest.status 无效。")
     _require_type(quest.get("options"), list, "daily_quest.options")
+    fixed_skill_ids = {item["id"] for item in default_skills()}
     option_ids: list[str] = []
     for index, option in enumerate(quest["options"]):
         _require_type(option, dict, f"daily_quest.options[{index}]")
@@ -1354,6 +1450,30 @@ def validate_state(state: Mapping[str, Any]) -> None:
         option_ids.append(task_id)
         if option.get("offer_id") != quest.get("offer_id"):
             raise StateError("任务选项的 offer_id 必须等于 daily_quest.offer_id。")
+        referenced_skill_ids: list[str] = []
+        for field in ("skill_id", "catalog_id"):
+            if isinstance(option.get(field), str):
+                referenced_skill_ids.append(option[field])
+        for field in ("skill_ids", "catalog_ids"):
+            if isinstance(option.get(field), list):
+                referenced_skill_ids.extend(option[field])
+        unknown_skill_ids = set(referenced_skill_ids) - fixed_skill_ids
+        if unknown_skill_ids:
+            raise StateError(
+                f"daily_quest.options[{index}] 引用了非标准技能："
+                f"{sorted(unknown_skill_ids)}"
+            )
+        option_ruleset = option.get("ruleset_version") or state["season"].get(
+            "ruleset_version"
+        )
+        if (
+            option_ruleset == RULESET_VERSION
+            and option.get("type") in {"open", "evolve"}
+            and not referenced_skill_ids
+        ):
+            raise StateError(
+                f"daily_quest.options[{index}] 的技能任务必须引用固定技能 ID。"
+            )
     _require_unique(option_ids, "daily_quest.options.task_id")
     fixed_medal_ids = {item["medal_id"] for item in default_medals()}
     locked_medal_ids = {
@@ -1520,8 +1640,12 @@ def validate_state(state: Mapping[str, Any]) -> None:
         item for item in state["catalog"] if item.get("tier") == "standard"
     ]
     expected_skill_ids = {item["id"] for item in default_skills()}
-    if {item.get("id") for item in standard_skills} != expected_skill_ids:
-        raise StateError("catalog 必须完整包含 70 项标准技能。")
+    if (
+        len(state["catalog"]) != 70
+        or len(standard_skills) != 70
+        or {item.get("id") for item in standard_skills} != expected_skill_ids
+    ):
+        raise StateError("catalog 必须恰好包含 70 项标准技能，不得创建自定义技能。")
     expected_medal_ids = {item["medal_id"] for item in default_medals()}
     if not expected_medal_ids.issubset(
         {item.get("medal_id") for item in state["medals"]}
@@ -1531,11 +1655,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
         status = skill.get("status")
         if status not in {"silhouette", "discovered", "owned", "mastered"}:
             raise StateError(f"catalog[{index}].status 无效。")
-        if (
-            skill.get("tier") == "standard"
-            and not skill.get("legacy_status", False)
-            and status in {"owned", "mastered"}
-        ):
+        if skill.get("legacy_status"):
+            raise StateError(f"catalog[{index}] 仍含未规范化的旧熟练度状态。")
+        if skill.get("tier") == "standard" and status in {"owned", "mastered"}:
             if not skill.get("thresholds"):
                 raise StateError(
                     f"catalog[{index}] 未锁定熟练度门槛，最高只能为练习中。"
@@ -1596,12 +1718,35 @@ def validate_state(state: Mapping[str, Any]) -> None:
                 raise StateError(
                     f"catalog[{index}].recent_performance.{field} 必须是字符串或 null。"
                 )
+    allowed_score_sources = {
+        "official",
+        "institution",
+        "teacher",
+        "platform",
+        "user_self",
+        "ai_internal",
+    }
+    for index, portfolio_item in enumerate(state["shenlun_portfolio"]):
+        _validate_score_fields(portfolio_item, f"shenlun_portfolio[{index}]")
+        source = portfolio_item.get("score_source")
+        if source is not None and source not in allowed_score_sources:
+            raise StateError(f"shenlun_portfolio[{index}].score_source 无效。")
     for index, assessment in enumerate(state["assessments"]):
+        _validate_score_fields(assessment, f"assessments[{index}]")
+        source = assessment.get("score_source")
+        if source is not None and source not in allowed_score_sources:
+            raise StateError(f"assessments[{index}].score_source 无效。")
+        if (
+            assessment.get("ruleset_version") == RULESET_VERSION
+            and assessment.get("score") is not None
+            and assessment.get("normalization_status") != "exact"
+        ):
+            raise StateError(f"assessments[{index}] 新战绩必须保存满分和得分率。")
         rank_delta = assessment.get("rank_delta", 0)
         if rank_delta and not assessment.get("ranked", False):
             raise StateError(f"assessments[{index}] 非 ranked 但改变了星级。")
         if assessment.get("ruleset_version") == RULESET_VERSION and rank_delta:
-            raise StateError("1.4 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
+            raise StateError("1.5 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
     _require_unique(assessment_ids, "assessments.assessment_id")
 
     for index, wrong in enumerate(state["wrong_answers"]):
@@ -1718,13 +1863,22 @@ def validate_state(state: Mapping[str, Any]) -> None:
         locked = task["locked_conditions"]
         verification = task.get("verification") or {}
         changes = verification.get("portfolio_changes", [])
+        task_ruleset = locked.get("ruleset_version") or state["season"].get(
+            "ruleset_version"
+        )
+        if (
+            task_ruleset == RULESET_VERSION
+            and verification.get("score") is not None
+            and _calculate_score_rate(
+                verification.get("score"), verification.get("score_max")
+            )
+            is None
+        ):
+            raise StateError("申论单题评分必须同时保存原始分数和满分。")
         for submission_ref in task.get("submission_refs", []):
             expected_id = f"portfolio:{submission_ref}"
             if expected_id not in portfolio_id_set:
                 raise StateError(f"已验证申论任务缺少答题册记录：{submission_ref}")
-            task_ruleset = locked.get("ruleset_version") or state["season"].get(
-                "ruleset_version"
-            )
             if task_ruleset == RULESET_VERSION and expected_id not in changes:
                 raise StateError(f"申论验证结果未声明 portfolio_changes：{expected_id}")
             answer_text = portfolio_by_id[expected_id].get("answer_text")
@@ -1978,8 +2132,13 @@ def commit_candidate(
         return _summary(state_path, next_state, "committed")
 
 
-def migrate_file(state_path: Path, timestamp: str | None = None) -> dict[str, Any]:
-    """备份后把旧结构迁移到 1.4。"""
+def migrate_file(
+    state_path: Path,
+    timestamp: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """校验迁移结果；非 dry-run 时备份并原子迁移到 1.5。"""
     with FileLock(_lock_path(state_path)):
         current = read_json(state_path)
         if current.get("schema_version") == SCHEMA_VERSION:
@@ -2000,8 +2159,30 @@ def migrate_file(state_path: Path, timestamp: str | None = None) -> dict[str, An
             )
         )
         validate_state(migrated)
+        result = _summary(
+            state_path,
+            migrated,
+            "dry-run" if dry_run else "migrated",
+        )
+        result["migration_report"] = migrated["engine"]["migration_history"][-1]
+        result["counts"] = {
+            "skills": len(migrated["catalog"]),
+            "assessments": len(migrated["assessments"]),
+            "shenlun_portfolio": len(migrated["shenlun_portfolio"]),
+            "medals": len(migrated["medals"]),
+        }
+        result["candidate_sha256"] = hashlib.sha256(
+            json.dumps(
+                migrated,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if dry_run:
+            return result
         _atomic_write(state_path, migrated, backup=True)
-        return _summary(state_path, migrated, "migrated")
+        return result
 
 
 def start_new_season_file(
@@ -2092,7 +2273,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="不存在时初始化状态")
     subparsers.add_parser("read", help="校验并输出正式状态")
     subparsers.add_parser("validate", help="只校验正式状态")
-    subparsers.add_parser("migrate", help="备份并迁移旧状态")
+    migrate_parser = subparsers.add_parser("migrate", help="备份并迁移旧状态")
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只校验并输出迁移报告，不写入状态",
+    )
 
     season_parser = subparsers.add_parser("new-season", help="归档当前赛季并重新定级")
     season_parser.add_argument("--start-date", required=True)
@@ -2125,7 +2311,7 @@ def main(argv: list[str] | None = None) -> int:
             state = read_current_state(state_path)
             _print_json(_summary(state_path, state, "valid"))
         elif args.command == "migrate":
-            _print_json(migrate_file(state_path))
+            _print_json(migrate_file(state_path, dry_run=args.dry_run))
         elif args.command == "new-season":
             _print_json(
                 start_new_season_file(

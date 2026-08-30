@@ -1,5 +1,7 @@
 """
 版本记录：
+- v3.1.0 / 2026-08-30
+  - 验证历史考试基线与 AI 内部单题评分使用明确的满分和中文来源。
 - v3.0.0 / 2026-08-30
   - 验证两排总览、70 项技能、27 枚勋章和赛季定级信息。
 
@@ -108,6 +110,58 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("历史最高", report)
         self.assertIn("行测 0/2", report)
         self.assertIn("钻石 ★★☆", report)
+
+    def test_dashboard_distinguishes_exam_baseline_and_single_question(self) -> None:
+        state = state_store.default_state("2026-08-30T00:00:00+00:00")
+        state["assessments"].append(
+            {
+                "assessment_id": "baseline-xingce",
+                "campaign_id": None,
+                "season_id": None,
+                "date": None,
+                "subject": "行测",
+                "scope": "历史考试基线",
+                "ranked": False,
+                "conditions": {"exam_label": "2026-省考"},
+                "score": 63.5,
+                "score_max": 100,
+                "score_rate": 63.5,
+                "normalization_status": "exact",
+                "score_source": "official",
+                "evidence_refs": [],
+                "rank_delta": 0,
+                "ruleset_version": "legacy-1.1",
+            }
+        )
+        state["shenlun_portfolio"].append(
+            {
+                "portfolio_id": "portfolio-1",
+                "campaign_id": None,
+                "season_id": None,
+                "date": "2026-08-28",
+                "task_type": "归纳概括-单题",
+                "prompt_ref": "风林村变化",
+                "submission_ref": "submission-1",
+                "score": 86,
+                "score_max": 100,
+                "score_rate": 86,
+                "normalization_status": "exact",
+                "score_source": "ai_internal",
+                "dimensions": {"覆盖": 26},
+                "answer_text": None,
+                "feedback": None,
+                "word_count": None,
+                "time_minutes": None,
+            }
+        )
+
+        report = dashboard.render_html(state, source_path=Path("state.json"))
+
+        self.assertIn("2026-省考", report)
+        self.assertIn("63.5/100", report)
+        self.assertIn("正式考试", report)
+        self.assertIn("AI内部单题评分：86/100", report)
+        self.assertIn("未保存原文", report)
 
     def test_build_report_escapes_user_content(self) -> None:
         state = state_store.default_state("2026-08-29T00:00:00+00:00")

@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.1.0 / 2026-08-30
+  - 为排位样本补充原始满分、得分率和 1.5 评分口径。
 - v1.0.0 / 2026-08-30
   - 验证新赛季排位样本门槛和旧赛季战绩隔离。
 """
@@ -32,10 +34,13 @@ class RankingEngineTests(unittest.TestCase):
             "ranked": True,
             "conditions": conditions,
             "score": score,
+            "score_max": 100,
+            "score_rate": score,
+            "normalization_status": "exact",
             "score_source": source,
             "evidence_refs": [],
             "rank_delta": 0,
-            "ruleset_version": "1.4.0",
+            "ruleset_version": "1.5.0",
         }
 
     def test_current_season_placement_ignores_old_results(self) -> None:

@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.6.0 / 2026-08-30
+  - 校验状态结构 1.5、固定 70 项技能及历史数据规范化脚本。
 - v1.5.0 / 2026-08-30
   - 校验状态结构 1.4、固定目录脚本和赛季定级脚本。
 
@@ -96,6 +98,7 @@ def main() -> int:
         "scripts/dashboard.py",
         "scripts/progression.py",
         "scripts/catalogs.py",
+        "scripts/normalization.py",
         "scripts/rankings.py",
         "tests/test_state_store.py",
         "tests/test_dashboard.py",

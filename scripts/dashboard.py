@@ -1,5 +1,8 @@
 """
 版本记录：
+- v3.1.0 / 2026-08-30
+  - 战绩和申论答题册同时显示原始分数、满分、得分率与中文评分来源。
+  - 历史考试基线使用原考试标签，AI 单题评分不再显示成整卷成绩。
 - v3.0.0 / 2026-08-30
   - 备考总览改为技能状态和学习记录两排可点击指标。
   - 勋章墙展示完整目录、进度口径与锁定状态，段位区展示重新定级进度。
@@ -64,6 +67,14 @@ WRONG_STATUS_LABELS = {
     "review_due": "待复测",
     "resolved": "已掌握",
 }
+SCORE_SOURCE_LABELS = {
+    "official": "正式考试",
+    "institution": "机构评分",
+    "teacher": "教师评分",
+    "platform": "平台量表",
+    "user_self": "用户自评",
+    "ai_internal": "AI内部估分",
+}
 
 
 def _escape(value: Any) -> str:
@@ -80,6 +91,21 @@ def _text(value: Any, empty: str = "尚未记录") -> str:
     if isinstance(value, bool):
         return "是" if value else "否"
     return str(value)
+
+
+def _score_text(item: dict[str, Any]) -> str:
+    score = item.get("score")
+    if score is None:
+        return "尚未评分"
+    if item.get("normalization_status") == "needs_review":
+        return f"{score}（口径待确认）"
+    score_max = item.get("score_max")
+    score_rate = item.get("score_rate")
+    if score_max is None:
+        return str(score)
+    if score_rate is not None and score_max != 100:
+        return f"{score}/{score_max}（{score_rate}%）"
+    return f"{score}/{score_max}"
 
 
 def _skill_progress(item: dict[str, Any]) -> tuple[int, int]:
@@ -213,21 +239,34 @@ def _render_ranking(item: dict[str, Any]) -> str:
 
 def _render_assessment(item: dict[str, Any]) -> str:
     ranked = "计入段位" if item.get("ranked") else "仅记录"
+    conditions = item.get("conditions")
+    if not isinstance(conditions, dict):
+        conditions = {}
+    date_label = item.get("date") or conditions.get("exam_label") or "日期未记录"
+    source = SCORE_SOURCE_LABELS.get(
+        str(item.get("score_source")), _text(item.get("score_source"))
+    )
     return f"""
-    <tr><td>{_escape(item.get("date"))}</td><td>{_escape(item.get("subject"))}</td>
-    <td>{_escape(item.get("scope"))}</td><td>{_escape(_text(item.get("score")))}</td>
-    <td>{_escape(item.get("score_source"))}</td><td>{ranked}</td></tr>"""
+    <tr><td>{_escape(date_label)}</td><td>{_escape(item.get("subject"))}</td>
+    <td>{_escape(item.get("scope"))}</td><td>{_escape(_score_text(item))}</td>
+    <td>{_escape(source)}</td><td>{ranked}</td></tr>"""
 
 
 def _render_answer(item: dict[str, Any]) -> str:
     answer = _text(item.get("answer_text"), "未保存原文")
     if len(answer) > 240:
         answer = f"{answer[:240]}…"
+    source = SCORE_SOURCE_LABELS.get(
+        str(item.get("score_source")), _text(item.get("score_source"))
+    )
+    score_label = (
+        "AI内部单题评分" if item.get("score_source") == "ai_internal" else "得分"
+    )
     return f"""
     <article class="card">
       <p class="path">{_escape(item.get("date"))} · {_escape(item.get("task_type"))}</p>
       <h3>{_escape(item.get("prompt_ref") or "未命名作答")}</h3>
-      <p>得分：{_escape(_text(item.get("score")))} · 来源：{_escape(_text(item.get("score_source")))}</p>
+      <p>{score_label}：{_escape(_score_text(item))} · 来源：{_escape(source)}</p>
       <p class="answer-text">{_escape(answer)}</p>
       <p>反馈：{_escape(_text(item.get("feedback")))}</p>
       <p class="muted">字数：{_escape(_text(item.get("word_count")))} · 用时：{_escape(_text(item.get("time_minutes")))} 分钟<br>批改维度：{_escape(_text(item.get("dimensions")))}</p>
