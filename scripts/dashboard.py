@@ -432,6 +432,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
   const medalCards=[...document.querySelectorAll('.medal')]; const medalFilters=[...document.querySelectorAll('.medal-filter')];
   medalFilters.forEach(button=>button.addEventListener('click',()=>{{const value=button.dataset.medalFilter;medalFilters.forEach(x=>x.classList.toggle('active',x===button));medalCards.forEach(card=>card.hidden=value!=='all'&&card.dataset.medalStatus!==value);}}));
   function requestRefresh(){{window.location.search='refresh=1';}}
+  if(new URLSearchParams(window.location.search).get('refresh')==='1')history.replaceState({{}},'',window.location.pathname);
   document.querySelector('#manual-refresh').addEventListener('click',requestRefresh);
   const nextRefresh=new Date(); nextRefresh.setHours(8,0,0,0); if(nextRefresh<=new Date())nextRefresh.setDate(nextRefresh.getDate()+1);
   setTimeout(requestRefresh,nextRefresh-new Date());
@@ -494,13 +495,6 @@ def create_server(
             except (OSError, StateError, ValueError) as exc:
                 self.log_error("dashboard refresh failed: %s", exc)
                 self.send_error(500, "Dashboard Update Failed")
-                return
-            if manual_refresh:
-                self.send_response(303)
-                self.send_header("Location", request_path)
-                self.send_header("Content-Length", "0")
-                self.send_header("Cache-Control", "no-store, max-age=0")
-                self.end_headers()
                 return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
