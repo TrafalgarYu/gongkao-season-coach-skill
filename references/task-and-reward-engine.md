@@ -69,12 +69,15 @@ not_generated → offered → accepted → submitted → verified → reward_rea
   "attendance_gate": "有效出勤的最低证据",
   "ability_gate": "技能熟练度门槛",
   "reward_preview": "达标后可能变化的技能、错题、易错点、战绩或勋章",
+  "medal_targets": ["至少一枚尚未点亮的固定勋章ID"],
   "ranked": false,
   "rank_gate": null,
   "strong_pass_gate": null,
   "candidate_score": 0
 }
 ```
+
+规则 1.4 下，A、B、C 三个候选都必须推进至少一枚未点亮勋章。技能训练关联相应模块勋章，订正关联纠错勋章，模考关联战绩或赛季勋章。勋章全部点亮后才允许 `medal_targets` 为空。勋章关联不改变到期风险和提分价值的优先级。
 
 没有可靠题源时，要求用户提供题目或调用已安装内容 Skill。不得只给“刷 20 道资料分析”这种无法验收的空任务；必须锁定范围、来源或待用户粘贴的输入方式。
 
@@ -162,7 +165,7 @@ candidate_score =
 
 同一份证据不得同时被拆成多次每日首胜。可以让同一证据支持多个相关能力判断，但必须逐项满足各自锁定门槛并引用同一 submission ref。
 
-申论评分必须保存来源：官方/机构批改、教师批改、平台量表、用户自评或 AI 内部估分。AI 内部估分只更新维度反馈，不能独立触发稳定通关或改变段位。
+申论评分必须保存来源：官方/机构批改、教师批改、平台量表、用户自评或 AI 内部估分。AI 内部估分只更新维度反馈，不能独立触发稳定通关或改变段位。只要提交中包含实质申论作答，`pass`、`partial` 和 `fail` 都必须保存原文并同步写入申论答题册。
 
 ## 7. 原子结算与结算单
 
@@ -170,11 +173,13 @@ candidate_score =
 
 1. 检查验证 event ID 与 task/reward 唯一约束。
 2. 写入原始证据引用和五类判定。
-3. 更新有效出勤、技能熟练度、错题、易错点、战绩与段位。
+3. 更新有效出勤、技能熟练度、错题、易错点、战绩与段位；申论提交同时创建或更新唯一 `portfolio:<submission_ref>`。
 4. 生成唯一 `reward_id = reward:<task_id>`。
 5. 更新调整点与流水，应用上限。
 6. 创建 `status = unrevealed` 的结算单。
-7. 把任务置为 `reward_ready` 并原子保存。
+7. 在申论验证结果中写入 `portfolio_changes`，把任务置为 `reward_ready` 并原子保存。
+
+已验证申论任务如果没有对应答题册条目，状态工具必须拒绝整次提交。重复验证同一个 `submission_ref` 时更新原条目，不得重复创建。
 
 结算单至少包含：
 

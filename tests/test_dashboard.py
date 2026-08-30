@@ -1,5 +1,8 @@
 """
 版本记录：
+- v3.0.0 / 2026-08-30
+  - 验证两排总览、70 项技能、27 枚勋章和赛季定级信息。
+
 - v2.1.0 / 2026-08-30
   - 验证技能实测指标、样本依据和只读 HTTP 服务的按需刷新与无缓存响应。
 
@@ -23,14 +26,13 @@ from scripts import dashboard, state_store
 class DashboardTests(unittest.TestCase):
     def test_dashboard_shows_six_sections_and_skill_progress(self) -> None:
         state = state_store.default_state("2026-08-29T00:00:00+00:00")
-        state["season"]["locked_catalog_ids"] = ["a-1"]
-        state["catalog"] = [
+        first, second = state["catalog"][:2]
+        state["season"]["locked_catalog_ids"] = [first["id"]]
+        first.update(
             {
-                "id": "a-1",
                 "subject": "行测",
                 "module": "资料分析",
                 "name": "基期量",
-                "tier": "core",
                 "status": "discovered",
                 "forms": {"base": True, "timed": False},
                 "thresholds": {"正确率": "80%"},
@@ -45,21 +47,21 @@ class DashboardTests(unittest.TestCase):
                 "evidence": [],
                 "last_tested_at": None,
                 "next_review_at": None,
-            },
+            }
+        )
+        second.update(
             {
-                "id": "a-2",
                 "subject": "申论",
                 "module": "归纳概括",
                 "name": "分类归纳",
-                "tier": "extension",
                 "status": "owned",
                 "forms": {"base": True},
                 "thresholds": {},
                 "evidence": [],
                 "last_tested_at": None,
                 "next_review_at": None,
-            },
-        ]
+            }
+        )
 
         state["subject_rankings"] = [
             {
@@ -97,27 +99,19 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("熟练度检查 1/2", report)
         self.assertNotIn("检查项 1/2 · 50%", report)
         self.assertIn('data-current="true"', report)
-        self.assertIn("全部 2", report)
-        self.assertIn("未开始 0", report)
+        self.assertIn("技能总数", report)
+        self.assertIn("全部 70", report)
+        self.assertIn("未开始 68", report)
+        self.assertIn("全部 27", report)
+        self.assertIn("熟练度鉴定规则", report)
+        self.assertIn("上赛季", report)
+        self.assertIn("历史最高", report)
+        self.assertIn("行测 0/2", report)
         self.assertIn("钻石 ★★☆", report)
 
     def test_build_report_escapes_user_content(self) -> None:
         state = state_store.default_state("2026-08-29T00:00:00+00:00")
-        state["catalog"] = [
-            {
-                "id": "unsafe",
-                "subject": "行测",
-                "module": "判断推理",
-                "name": "<script>alert(1)</script>",
-                "tier": "core",
-                "status": "silhouette",
-                "forms": {},
-                "thresholds": {},
-                "evidence": [],
-                "last_tested_at": None,
-                "next_review_at": None,
-            }
-        ]
+        state["catalog"][0]["name"] = "<script>alert(1)</script>"
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             output_path = Path(temp_dir) / "dashboard.html"

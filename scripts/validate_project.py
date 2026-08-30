@@ -1,7 +1,10 @@
 """
 版本记录：
+- v1.5.0 / 2026-08-30
+  - 校验状态结构 1.4、固定目录脚本和赛季定级脚本。
+
 - v1.4.0 / 2026-08-29
-  - 校验备考总览、段位计算器及状态结构 1.3 的测试文件。
+  - 校验备考总览、段位计算器及对应测试文件。
 
 - v1.3.0 / 2026-08-29
   - 把 HTML 总览生成器与对应测试加入项目完整性检查。
@@ -18,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from catalogs import merge_default_catalogs
 from state_store import RULESET_VERSION, SCHEMA_VERSION, default_state, validate_state
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,9 +95,12 @@ def main() -> int:
         "scripts/state_store.py",
         "scripts/dashboard.py",
         "scripts/progression.py",
+        "scripts/catalogs.py",
+        "scripts/rankings.py",
         "tests/test_state_store.py",
         "tests/test_dashboard.py",
         "tests/test_progression.py",
+        "tests/test_rankings.py",
         "tests/fixtures/state-v1.0.json",
     )
     for relative in required_paths:
@@ -139,6 +146,7 @@ def main() -> int:
         expected = default_state()
         errors.extend(compare_structure(expected, documented))
         try:
+            merge_default_catalogs(documented)
             validate_state(documented)
         except Exception as exc:  # noqa: BLE001 - 聚合项目校验错误
             errors.append(f"文档默认状态未通过运行时校验：{exc}")

@@ -1,5 +1,8 @@
 """
 版本记录：
+- v1.4.0 / 2026-08-30
+  - 覆盖固定技能和勋章目录、申论答题册同步、赛季重定级及旧赛季证据隔离。
+
 - v1.3.1 / 2026-08-30
   - 验证技能近期实测快照的指标、百分值与样本字段。
 
@@ -31,14 +34,16 @@ class StateStoreTests(unittest.TestCase):
 
         state_store.validate_state(state)
 
-        self.assertEqual(state["schema_version"], "1.3")
-        self.assertEqual(state["engine"]["ruleset_version"], "1.3.0")
+        self.assertEqual(state["schema_version"], "1.4")
+        self.assertEqual(state["engine"]["ruleset_version"], "1.4.0")
         self.assertEqual(state["goal_contract"]["module_targets"], [])
         self.assertEqual(state["goal_contract"]["subject_targets"], [])
         self.assertEqual(state["wrong_answers"], [])
         self.assertEqual(state["module_rankings"], [])
         self.assertEqual(state["subject_rankings"], [])
-        self.assertEqual(state["medals"], [])
+        self.assertEqual(len(state["catalog"]), 70)
+        self.assertEqual(len(state["medals"]), 27)
+        self.assertTrue(all(item["status"] == "locked" for item in state["medals"]))
 
     def test_v12_migration_adds_progression_collections(self) -> None:
         old = state_store.default_state(TIMESTAMP)
@@ -53,9 +58,9 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
 
         state_store.validate_state(migrated)
-        self.assertEqual(migrated["schema_version"], "1.3")
-        self.assertEqual(migrated["engine"]["ruleset_version"], "1.3.0")
-        self.assertEqual(migrated["season"]["ruleset_version"], "1.2.0")
+        self.assertEqual(migrated["schema_version"], "1.4")
+        self.assertEqual(migrated["engine"]["ruleset_version"], "1.4.0")
+        self.assertEqual(migrated["season"]["ruleset_version"], "1.4.0")
         self.assertEqual(migrated["wrong_answers"], [])
 
     def test_rank_lines_must_be_ordered(self) -> None:
@@ -217,10 +222,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertTrue(migrated["campaign"]["campaign_id"])
             self.assertTrue(migrated["season"]["season_id"])
             self.assertTrue(migrated["attendance"]["records"][0]["counts_as_effective"])
-            self.assertEqual(
-                migrated["season"]["ruleset_version"],
-                "1.1.0",
-            )
+            self.assertEqual(migrated["season"]["ruleset_version"], "1.4.0")
 
     def test_actual_v1_fixture_migrates_without_rejudging(self) -> None:
         old = json.loads((FIXTURES / "state-v1.0.json").read_text(encoding="utf-8"))
@@ -228,10 +230,14 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
         state_store.validate_state(migrated)
 
-        self.assertEqual(migrated["schema_version"], "1.3")
+        self.assertEqual(migrated["schema_version"], "1.4")
         self.assertEqual(migrated["season"]["status"], "preseason")
         self.assertEqual(migrated["season"]["phase"], "calibration")
-        self.assertEqual(migrated["season"]["ruleset_version"], "legacy-1.0")
+        self.assertEqual(migrated["season"]["ruleset_version"], "1.4.0")
+        self.assertEqual(
+            migrated["engine"]["migration_history"][0]["previous_season_ruleset"],
+            "legacy-1.0",
+        )
         self.assertFalse(
             migrated["engine"]["migration_history"][0]["historical_results_rejudged"]
         )
@@ -251,11 +257,11 @@ class StateStoreTests(unittest.TestCase):
             "rank_delta": 1,
             "score_source": "ai_internal",
             "evidence_refs": [],
-            "ruleset_version": "1.3.0",
+            "ruleset_version": "1.4.0",
         }
         state["assessments"].append(assessment)
 
-        with self.assertRaisesRegex(state_store.StateError, "滚动战绩"):
+        with self.assertRaisesRegex(state_store.StateError, "rank_delta"):
             state_store.validate_state(state)
 
     def test_skill_recent_performance_is_validated(self) -> None:
@@ -287,6 +293,230 @@ class StateStoreTests(unittest.TestCase):
         skill["recent_performance"]["value"] = 101
         with self.assertRaisesRegex(state_store.StateError, "value 必须位于"):
             state_store.validate_state(state)
+
+    def test_default_catalog_has_locked_module_counts(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        counts: dict[str, int] = {}
+        for skill in state["catalog"]:
+            counts[skill["module"]] = counts.get(skill["module"], 0) + 1
+
+        self.assertEqual(
+            counts,
+            {
+                "资料分析": 13,
+                "数量关系": 12,
+                "言语理解": 10,
+                "判断推理": 15,
+                "常识判断": 6,
+                "申论": 14,
+            },
+        )
+
+    def test_verified_shenlun_commit_writes_portfolio_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_store.initialize_file(state_path, TIMESTAMP)
+            candidate = state_store.read_current_state(state_path)
+            candidate["task_history"].append(
+                {
+                    "task_id": "shenlun-1",
+                    "campaign_id": None,
+                    "season_id": None,
+                    "date": "2026-08-30",
+                    "status": "verified",
+                    "locked_conditions": {
+                        "subject": "申论",
+                        "task_type": "归纳概括",
+                        "prompt_ref": "prompt-1",
+                        "ruleset_version": "1.4.0",
+                    },
+                    "submission_refs": ["submission-1"],
+                    "verification": {
+                        "task_result": "partial",
+                        "answer_text": "这是我的申论答案。",
+                        "score": 12,
+                        "score_source": "teacher",
+                        "feedback": "分类还可再清楚。",
+                        "word_count": 10,
+                        "time_minutes": 18,
+                        "dimensions": {"采点": 6},
+                    },
+                    "reward_id": None,
+                }
+            )
+
+            state_store.commit_candidate(
+                state_path,
+                candidate,
+                expected_revision=0,
+                event_id="verify:shenlun-1",
+                timestamp=TIMESTAMP,
+            )
+            saved = state_store.read_current_state(state_path)
+
+            self.assertEqual(len(saved["shenlun_portfolio"]), 1)
+            self.assertEqual(
+                saved["shenlun_portfolio"][0]["portfolio_id"],
+                "portfolio:submission-1",
+            )
+            self.assertEqual(
+                saved["task_history"][0]["verification"]["portfolio_changes"],
+                ["portfolio:submission-1"],
+            )
+
+    def test_verified_shenlun_without_answer_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_store.initialize_file(state_path, TIMESTAMP)
+            candidate = state_store.read_current_state(state_path)
+            candidate["task_history"].append(
+                {
+                    "task_id": "shenlun-missing",
+                    "campaign_id": None,
+                    "season_id": None,
+                    "date": "2026-08-30",
+                    "status": "verified",
+                    "locked_conditions": {
+                        "subject": "申论",
+                        "ruleset_version": "1.4.0",
+                    },
+                    "submission_refs": ["missing-answer"],
+                    "verification": {"task_result": "fail"},
+                    "reward_id": None,
+                }
+            )
+
+            with self.assertRaisesRegex(state_store.StateError, "作答原文"):
+                state_store.commit_candidate(
+                    state_path,
+                    candidate,
+                    expected_revision=0,
+                    event_id="verify:shenlun-missing",
+                    timestamp=TIMESTAMP,
+                )
+
+    def test_new_season_preserves_ability_and_resets_rank(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        state["campaign"]["campaign_id"] = "campaign-1"
+        state["season"].update(
+            {
+                "season_id": "campaign-1:season-1",
+                "campaign_id": "campaign-1",
+                "status": "active",
+                "rank": "钻石",
+                "stars": 2,
+                "highest_rank": "大师",
+            }
+        )
+        state["catalog"][0]["status"] = "mastered"
+        state["catalog"][0]["thresholds"] = {"accuracy": 80}
+        state["catalog"][0]["forms"].update(
+            {"timed": True, "mixed": True, "retained": True}
+        )
+        state["medals"][0].update(
+            {"status": "unlocked", "unlocked_at": TIMESTAMP, "evidence_refs": ["x"]}
+        )
+        state["attendance"]["records"] = [
+            {
+                "date": "2026-08-29",
+                "campaign_id": "campaign-1",
+                "season_id": "campaign-1:season-1",
+                "status": "effective",
+                "counts_as_effective": True,
+                "task_id": None,
+                "submission_refs": [],
+                "recorded_at": TIMESTAMP,
+            }
+        ]
+        four_sims = next(
+            item for item in state["medals"] if item["medal_id"] == "medal-four-sims"
+        )
+        four_sims["progress_current"] = 3
+
+        next_state = state_store.start_new_season(
+            state,
+            start_date="2026-09-01",
+            end_date="2026-09-28",
+            theme="限时稳定",
+            timestamp=TIMESTAMP,
+        )
+
+        self.assertEqual(next_state["season"]["rank"], "未定级")
+        self.assertEqual(next_state["season"]["previous_rank"], "钻石")
+        self.assertEqual(next_state["season"]["highest_rank"], "大师")
+        self.assertEqual(next_state["catalog"][0]["status"], "mastered")
+        self.assertEqual(next_state["medals"][0]["status"], "unlocked")
+        self.assertEqual(
+            next(
+                item
+                for item in next_state["medals"]
+                if item["medal_id"] == "medal-four-sims"
+            )["progress_current"],
+            0,
+        )
+        self.assertEqual(
+            next(
+                item
+                for item in next_state["medals"]
+                if item["medal_id"] == "medal-first-result"
+            )["progress_current"],
+            1,
+        )
+        self.assertEqual(len(next_state["season_history"]), 1)
+        self.assertEqual(next_state["module_rankings"], [])
+        self.assertEqual(next_state["subject_rankings"], [])
+
+    def test_new_task_options_must_target_locked_medal(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        state["daily_quest"].update(
+            {
+                "status": "offered",
+                "offer_id": "offer-1",
+                "options": [{"offer_id": "offer-1", "task_id": "task-1"}],
+            }
+        )
+        with self.assertRaisesRegex(state_store.StateError, "未点亮勋章"):
+            state_store.validate_state(state)
+
+        state["daily_quest"]["options"][0]["medal_targets"] = ["medal-first-result"]
+        state_store.validate_state(state)
+
+    def test_v13_migration_keeps_legacy_medal_and_open_task(self) -> None:
+        old = state_store.default_state(TIMESTAMP)
+        old["schema_version"] = "1.3"
+        old["engine"]["ruleset_version"] = "1.3.0"
+        old["season"]["ruleset_version"] = "1.3.0"
+        old["medals"].append(
+            {
+                "medal_id": "legacy-medal",
+                "name": "旧赛季纪念",
+                "description": "旧版已经获得",
+                "status": "unlocked",
+                "condition": {},
+                "evidence_refs": ["legacy-evidence"],
+                "unlocked_at": TIMESTAMP,
+            }
+        )
+        old["daily_quest"].update(
+            {
+                "status": "offered",
+                "offer_id": "old-offer",
+                "options": [{"offer_id": "old-offer", "task_id": "old-task"}],
+            }
+        )
+
+        migrated = state_store.migrate_state(old, TIMESTAMP)
+        state_store.validate_state(migrated)
+
+        legacy = next(
+            item for item in migrated["medals"] if item["medal_id"] == "legacy-medal"
+        )
+        self.assertEqual(legacy["status"], "unlocked")
+        self.assertEqual(legacy["category"], "历史")
+        self.assertEqual(
+            migrated["daily_quest"]["options"][0]["ruleset_version"],
+            "1.3.0",
+        )
 
     def test_recovery_keeps_corrupt_copy_and_restores_valid_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

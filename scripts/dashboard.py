@@ -1,5 +1,10 @@
 """
 版本记录：
+- v3.0.0 / 2026-08-30
+  - 备考总览改为技能状态和学习记录两排可点击指标。
+  - 勋章墙展示完整目录、进度口径与锁定状态，段位区展示重新定级进度。
+  - 技能页公开四档熟练度的鉴定标准，申论答题册展示原文与反馈。
+
 - v2.1.0 / 2026-08-30
   - 技能卡新增近期正确率或得分率、样本数、题量和证据窗口，检查项不再显示为正确率式百分比。
   - 新增 --serve 只读 HTTP 服务；每次访问按状态文件修改时间更新页面，并禁止浏览器缓存旧页面。
@@ -25,8 +30,10 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 try:
+    from .catalogs import default_medals
     from .state_store import StateError, read_current_state, resolve_state_path
 except ImportError:  # 直接运行 scripts/dashboard.py 时没有包上下文
+    from catalogs import default_medals
     from state_store import StateError, read_current_state, resolve_state_path
 
 PROFICIENCY_LABELS = {
@@ -83,6 +90,8 @@ def _skill_progress(item: dict[str, Any]) -> tuple[int, int]:
 
 
 def _skill_next_step(item: dict[str, Any]) -> str:
+    if item.get("needs_retest"):
+        return "需要复测：原熟练度保留，完成本赛季同口径验证后更新"
     checks = item.get("forms")
     if isinstance(checks, dict):
         missing = [
@@ -211,23 +220,39 @@ def _render_assessment(item: dict[str, Any]) -> str:
 
 
 def _render_answer(item: dict[str, Any]) -> str:
+    answer = _text(item.get("answer_text"), "未保存原文")
+    if len(answer) > 240:
+        answer = f"{answer[:240]}…"
     return f"""
     <article class="card">
       <p class="path">{_escape(item.get("date"))} · {_escape(item.get("task_type"))}</p>
       <h3>{_escape(item.get("prompt_ref") or "未命名作答")}</h3>
       <p>得分：{_escape(_text(item.get("score")))} · 来源：{_escape(_text(item.get("score_source")))}</p>
-      <p class="muted">批改维度：{_escape(_text(item.get("dimensions")))}</p>
+      <p class="answer-text">{_escape(answer)}</p>
+      <p>反馈：{_escape(_text(item.get("feedback")))}</p>
+      <p class="muted">字数：{_escape(_text(item.get("word_count")))} · 用时：{_escape(_text(item.get("time_minutes")))} 分钟<br>批改维度：{_escape(_text(item.get("dimensions")))}</p>
     </article>"""
 
 
 def _render_medal(item: dict[str, Any]) -> str:
     unlocked = item.get("status") == "unlocked"
+    condition = item.get("condition") if isinstance(item.get("condition"), dict) else {}
+    scope = "本赛季" if condition.get("scope") == "season" else "生涯累计"
+    current = item.get("progress_current", 0)
+    target = item.get("progress_target", condition.get("target", 1))
+    evidence = item.get("evidence_refs")
+    evidence_count = len(evidence) if isinstance(evidence, list) else 0
     return f"""
-    <article class="card medal {"unlocked" if unlocked else "locked"}">
-      <span class="medal-icon">{"●" if unlocked else "○"}</span>
+    <article class="card medal {"unlocked" if unlocked else "locked"}"
+             data-medal-status="{"unlocked" if unlocked else "locked"}"
+             data-medal-category="{_escape(item.get("category", "其他"))}">
+      <div class="medal-mark"><span>{"已点亮" if unlocked else "未点亮"}</span></div>
+      <p class="path">{_escape(item.get("category", "其他"))} · {scope}</p>
       <h3>{_escape(item.get("name") or "未命名勋章")}</h3>
       <p>{_escape(_text(item.get("description")))}</p>
-      <p class="muted">条件：{_escape(_text(item.get("condition"), "尚未设置"))}</p>
+      <div class="medal-progress"><i style="width:{min(100, round(current / target * 100)) if target else 0}%"></i></div>
+      <p class="medal-count">{_escape(current)}/{_escape(target)} {_escape(item.get("progress_unit", "项"))}</p>
+      <p class="muted">证据 {evidence_count} 条 · 点亮时间：{_escape(_text(item.get("unlocked_at"), "尚未点亮"))}</p>
     </article>"""
 
 
@@ -267,22 +292,33 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     answers = "".join(
         _render_answer(item) for item in state.get("shenlun_portfolio", [])
     )
-    medals = "".join(_render_medal(item) for item in state.get("medals", []))
-
-    total = len(catalog)
-    usable = sum(item.get("status") in {"owned", "mastered"} for item in catalog)
-    mastered = sum(item.get("status") == "mastered" for item in catalog)
-    practicing = sum(item.get("status") == "discovered" for item in catalog)
-    not_started = total - usable - practicing
     medal_items = state.get("medals", [])
-    unlocked_medals = sum(item.get("status") == "unlocked" for item in medal_items)
+    fixed_medal_ids = {item["medal_id"] for item in default_medals()}
+    fixed_medals = [
+        item for item in medal_items if item.get("medal_id") in fixed_medal_ids
+    ]
+    medals = "".join(_render_medal(item) for item in medal_items)
+
+    standard = [item for item in catalog if item.get("tier") == "standard"]
+    total = len(standard)
+    counts = {
+        status: sum(item.get("status") == status for item in standard)
+        for status in PROFICIENCY_LABELS
+    }
+    unlocked_medals = sum(item.get("status") == "unlocked" for item in fixed_medals)
+    all_unlocked_medals = sum(item.get("status") == "unlocked" for item in medal_items)
     open_easy_points = sum(
         item.get("status") != "sealed" for item in state.get("error_hunts", [])
     )
     adjustment = state.get("economy", {}).get("command_points", 0)
     adjustment_cap = state.get("economy", {}).get("command_points_cap", 0)
-    rank = state.get("season", {}).get("rank", "未定级")
-    stars = state.get("season", {}).get("stars", 0)
+    season = state.get("season", {})
+    rank = season.get("rank", "未定级")
+    stars = season.get("stars", 0)
+    previous_rank = season.get("previous_rank", "未定级")
+    previous_stars = season.get("previous_stars", 0)
+    highest_rank = season.get("highest_rank", "未定级")
+    placement = season.get("placement_progress", {})
     updated_at = state.get("engine", {}).get("updated_at") or "尚未记录"
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -295,51 +331,63 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
       --text:#edf5ff; --muted:#91a3b8; --gold:#ffc857; --blue:#4cc9f0; --green:#4ade80; }}
     * {{ box-sizing:border-box }} body {{ margin:0; color:var(--text); background:radial-gradient(circle at 80% 0,#17345c 0,transparent 35%),var(--bg); font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif }}
     main {{ width:min(1180px,calc(100% - 32px)); margin:auto; padding:38px 0 64px }} header {{ display:flex; justify-content:space-between; gap:24px; align-items:end }}
-    h1 {{ margin:0; font-size:clamp(30px,5vw,48px) }} h2 {{ margin:26px 0 12px }} h3 {{ margin:2px 0 10px }} .eyebrow,.path,.muted,.meta {{ color:var(--muted) }} .eyebrow,.path {{ margin:0; font-size:12px }} .meta {{ text-align:right; font-size:12px }}
-    .summary {{ display:grid; grid-template-columns:repeat(6,1fr); gap:10px; margin:22px 0 }} .metric,.card,.tabs,.filters,.table-wrap,.empty {{ background:var(--panel); border:1px solid var(--line); border-radius:14px }}
-    .metric {{ padding:14px }} .metric strong {{ display:block; color:var(--gold); font-size:25px }} .metric span {{ color:var(--muted); font-size:12px }} .tabs,.filters {{ display:flex; gap:8px; flex-wrap:wrap; padding:10px; margin-bottom:16px }}
+    h1 {{ margin:0; font-size:clamp(30px,5vw,48px) }} h2 {{ margin:26px 0 12px }} h3 {{ margin:2px 0 10px }} .eyebrow,.path,.muted,.meta {{ color:var(--muted) }} .eyebrow,.path {{ margin:0; font-size:12px }} .meta {{ max-width:48%; text-align:right; font-size:12px; overflow-wrap:anywhere }}
+    .summary {{ display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:10px 0 }} .summary-label {{ margin:22px 0 2px; color:var(--muted); font-size:12px; letter-spacing:.12em }} .metric,.card,.tabs,.filters,.table-wrap,.empty,.rank-overview,details {{ background:var(--panel); border:1px solid var(--line); border-radius:14px }}
+    .metric {{ min-width:0; padding:14px; text-align:left }} .metric:hover,.metric:focus-visible {{ border-color:var(--gold); transform:translateY(-1px) }} .metric strong {{ display:block; color:var(--gold); font-size:25px }} .metric span {{ color:var(--muted); font-size:12px }} .tabs,.filters {{ display:flex; gap:8px; flex-wrap:wrap; padding:10px; margin-bottom:16px }}
     button,input {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624; font:inherit }} button {{ cursor:pointer }} button.active {{ color:var(--gold); border-color:var(--gold) }} input {{ flex:1; min-width:210px }}
     .grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:13px }} .card {{ padding:16px; position:relative; overflow:hidden }} .card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start }} .status {{ padding:3px 8px; border-radius:99px; background:#1c2b3d; white-space:nowrap; font-size:12px }}
     .status-mastered {{ color:var(--gold) }} .status-owned {{ color:var(--green) }} .status-discovered {{ color:var(--blue) }} .progress {{ height:7px; background:#26364a; border-radius:99px; overflow:hidden }} .progress i {{ display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--green)) }}
     .skill-performance {{ display:flex; justify-content:space-between; gap:12px; align-items:end; margin:12px 0; padding:10px 12px; background:#0b1624; border-left:3px solid var(--gold); border-radius:3px 9px 9px 3px }} .skill-performance span {{ display:block; color:var(--muted); font-size:11px }} .skill-performance strong {{ color:var(--gold); font-size:22px; line-height:1.2 }} .skill-performance p {{ margin:0; color:var(--muted); font-size:12px; text-align:right }}
     .chips {{ display:flex; flex-wrap:wrap; gap:5px }} .chip {{ padding:3px 7px; border-radius:7px; font-size:12px }} .chip.done {{ color:#baf7cc; background:#143323 }} .chip.todo {{ color:#b5c0cd; background:#1a2736 }} .season-tag {{ position:absolute; right:0; bottom:0; padding:3px 9px; color:#08111d; background:var(--gold); font-size:11px; font-weight:700 }}
-    .rank {{ color:var(--gold); font-size:22px }} .medal-icon {{ color:var(--gold); font-size:28px }} .medal.locked {{ opacity:.58 }} .table-wrap {{ overflow:auto }} table {{ width:100%; border-collapse:collapse }} th,td {{ padding:10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap }}
-    .empty {{ grid-column:1/-1; padding:36px; text-align:center; color:var(--muted) }} .page[hidden],[hidden] {{ display:none!important }} @media(max-width:900px) {{ .summary {{ grid-template-columns:repeat(3,1fr) }} .grid {{ grid-template-columns:repeat(2,1fr) }} }} @media(max-width:600px) {{ header {{ display:block }} .meta {{ text-align:left;margin-top:10px }} .summary,.grid {{ grid-template-columns:1fr 1fr }} }}
+    details {{ padding:12px 16px; margin-bottom:16px }} summary {{ cursor:pointer; color:var(--gold); font-weight:700 }} .rank-overview {{ display:grid; grid-template-columns:1.2fr repeat(3,1fr); gap:14px; padding:18px }} .rank-now strong {{ display:block; color:var(--gold); font-size:28px }} .rank-stat span {{ display:block; color:var(--muted); font-size:12px }} .rank-stat strong {{ font-size:18px }}
+    .rank {{ color:var(--gold); font-size:22px }} .medal {{ transition:border-color .2s,filter .2s }} .medal.locked {{ filter:grayscale(1); opacity:.58 }} .medal.unlocked {{ border-color:#78622f; background:linear-gradient(145deg,#182334,#322917) }} .medal-mark {{ width:64px; height:64px; display:grid; place-items:center; border:2px solid var(--gold); border-radius:50%; margin-bottom:12px; color:var(--gold); font-size:11px; font-weight:700 }} .medal-count {{ color:var(--gold); font-weight:700 }} .answer-text {{ padding:10px; background:#0b1624; border-radius:8px; white-space:pre-wrap }} .medal-progress {{ height:7px; background:#26364a; border-radius:99px; overflow:hidden }} .medal-progress i {{ display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--green)) }} .table-wrap {{ overflow:auto }} table {{ width:100%; border-collapse:collapse }} th,td {{ padding:10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap }}
+    .empty {{ grid-column:1/-1; padding:36px; text-align:center; color:var(--muted) }} .page[hidden],[hidden] {{ display:none!important }} @media(max-width:900px) {{ .summary {{ grid-template-columns:repeat(3,minmax(0,1fr)) }} .grid {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} }} @media(max-width:600px) {{ header {{ display:block }} .meta {{ max-width:100%; text-align:left;margin-top:10px }} .summary,.grid,.rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} }}
   </style>
 </head><body><main>
-  <header><div><p class="eyebrow">GONGKAO SEASON</p><h1>备考总览</h1></div>
+  <header><div><p class="eyebrow">GONGKAO SEASON · 第 {_escape(season.get("number", 1))} 赛季</p><h1>备考总览</h1></div>
     <div class="meta">数据更新：{_escape(updated_at)}<br>页面生成：{_escape(generated_at)}<br>数据文件：{_escape(source_path)}</div></header>
-  <section class="summary">
-    <div class="metric"><strong>{mastered}/{total}</strong><span>稳定掌握技能</span></div>
-    <div class="metric"><strong>{len(state.get("wrong_answers", []))}</strong><span>错题记录</span></div>
-    <div class="metric"><strong>{open_easy_points}</strong><span>未解决易错点</span></div>
-    <div class="metric"><strong>{len(state.get("assessments", []))}</strong><span>有效战绩</span></div>
-    <div class="metric"><strong>{unlocked_medals}/{len(medal_items)}</strong><span>已获勋章</span></div>
-    <div class="metric"><strong>{_escape(rank)} {"★" * stars}</strong><span>综合段位 · 调整点 {adjustment}/{adjustment_cap}</span></div>
+  <p class="summary-label">技能全貌</p><section class="summary">
+    <button class="metric jump" data-tab="skills" data-filter="all"><strong>{total}</strong><span>技能总数</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="mastered"><strong>{counts["mastered"]}</strong><span>稳定掌握</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="owned"><strong>{counts["owned"]}</strong><span>考场可用</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="discovered"><strong>{counts["discovered"]}</strong><span>练习中</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="silhouette"><strong>{counts["silhouette"]}</strong><span>未开始</span></button>
+  </section>
+  <p class="summary-label">学习记录</p><section class="summary">
+    <button class="metric jump" data-tab="wrongs"><strong>{len(state.get("wrong_answers", []))}</strong><span>错题</span></button>
+    <button class="metric jump" data-tab="easy-points"><strong>{open_easy_points}</strong><span>未解决易错点</span></button>
+    <button class="metric jump" data-tab="records"><strong>{len(state.get("assessments", []))}</strong><span>有效战绩</span></button>
+    <button class="metric jump" data-tab="medals"><strong>{unlocked_medals}/27</strong><span>已点亮勋章</span></button>
+    <button class="metric jump" data-tab="records"><strong>{_escape(rank)} {"★" * stars}</strong><span>本赛季段位 · 调整点 {adjustment}/{adjustment_cap}</span></button>
   </section>
   <nav class="tabs">
     <button class="tab-btn active" data-tab="skills">技能总览</button><button class="tab-btn" data-tab="wrongs">错题本</button>
     <button class="tab-btn" data-tab="easy-points">易错点</button><button class="tab-btn" data-tab="records">战绩</button>
     <button class="tab-btn" data-tab="answers">申论答题册</button><button class="tab-btn" data-tab="medals">勋章墙</button>
   </nav>
-  <section class="page" data-page="skills"><div class="filters">
-    <button class="filter-btn active" data-filter="all">全部 {total}</button><button class="filter-btn" data-filter="mastered">稳定掌握 {mastered}</button>
-    <button class="filter-btn" data-filter="owned">考场可用 {usable - mastered}</button><button class="filter-btn" data-filter="discovered">练习中 {practicing}</button>
-    <button class="filter-btn" data-filter="silhouette">未开始 {not_started}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
+  <section class="page" data-page="skills"><details><summary>熟练度鉴定规则</summary><p>未开始：没有有效证据。练习中：做过练习，但还没通过考场条件。考场可用：通过限时、新材料或混合题验证。稳定掌握：考场可用后，7 至 15 天延迟复测仍达标，并且没有对应的高风险未解决易错点。没有预先锁定门槛的技能最高只能进入练习中。</p></details><div class="filters">
+    <button class="filter-btn active" data-filter="all">全部 {total}</button><button class="filter-btn" data-filter="mastered">稳定掌握 {counts["mastered"]}</button>
+    <button class="filter-btn" data-filter="owned">考场可用 {counts["owned"]}</button><button class="filter-btn" data-filter="discovered">练习中 {counts["discovered"]}</button>
+    <button class="filter-btn" data-filter="silhouette">未开始 {counts["silhouette"]}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
     <input id="skill-search" type="search" placeholder="搜索科目、模块或技能"></div>
     <div class="grid" id="skill-grid">{skills or _empty("技能目录尚未建立。完成季前校准后再生成总览。")}</div></section>
   <section class="page" data-page="wrongs" hidden><h2>错题本</h2><div class="grid">{wrongs or _empty("暂无错题记录。")}</div></section>
   <section class="page" data-page="easy-points" hidden><h2>易错点</h2><div class="grid">{easy_points or _empty("暂无易错点。")}</div></section>
-  <section class="page" data-page="records" hidden><h2>当前段位</h2><div class="grid">{rankings or _empty("有效样本不足，当前未定级。")}</div>
+  <section class="page" data-page="records" hidden><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
     <h2>战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>科目</th><th>范围</th><th>成绩</th><th>来源</th><th>用途</th></tr></thead><tbody>{assessments or '<tr><td colspan="6">暂无战绩。</td></tr>'}</tbody></table></div></section>
   <section class="page" data-page="answers" hidden><h2>申论答题册</h2><div class="grid">{answers or _empty("暂无申论作答。")}</div></section>
-  <section class="page" data-page="medals" hidden><h2>勋章墙</h2><div class="grid">{medals or _empty("勋章目录尚未建立。")}</div></section>
+  <section class="page" data-page="medals" hidden><h2>勋章墙</h2><div class="filters"><button class="medal-filter active" data-medal-filter="all">全部 {len(medal_items)}</button><button class="medal-filter" data-medal-filter="locked">未点亮 {len(medal_items) - all_unlocked_medals}</button><button class="medal-filter" data-medal-filter="unlocked">已点亮 {all_unlocked_medals}</button></div><div class="grid">{medals}</div></section>
 </main><script>
   const tabs=[...document.querySelectorAll('.tab-btn')]; const pages=[...document.querySelectorAll('.page')];
-  tabs.forEach(button=>button.addEventListener('click',()=>{{tabs.forEach(x=>x.classList.toggle('active',x===button));pages.forEach(page=>page.hidden=page.dataset.page!==button.dataset.tab);}}));
+  function openTab(name){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.tab===name));pages.forEach(page=>page.hidden=page.dataset.page!==name);}}
+  tabs.forEach(button=>button.addEventListener('click',()=>openTab(button.dataset.tab)));
   const cards=[...document.querySelectorAll('.skill-card')]; const filters=[...document.querySelectorAll('.filter-btn')]; const search=document.querySelector('#skill-search'); let filter='all';
   function apply(){{const q=search.value.trim().toLowerCase();cards.forEach(card=>{{const status=card.dataset.status;const match=filter==='all'||status===filter||(filter==='current'&&card.dataset.current==='true');card.hidden=!(match&&card.dataset.search.includes(q));}});}}
-  filters.forEach(button=>button.addEventListener('click',()=>{{filter=button.dataset.filter;filters.forEach(x=>x.classList.toggle('active',x===button));apply();}})); search.addEventListener('input',apply);
+  function setSkillFilter(value){{filter=value;filters.forEach(x=>x.classList.toggle('active',x.dataset.filter===value));apply();}}
+  filters.forEach(button=>button.addEventListener('click',()=>setSkillFilter(button.dataset.filter))); search.addEventListener('input',apply);
+  document.querySelectorAll('.jump').forEach(button=>button.addEventListener('click',()=>{{openTab(button.dataset.tab);if(button.dataset.filter)setSkillFilter(button.dataset.filter);document.querySelector('.tabs').scrollIntoView({{behavior:'smooth'}});}}));
+  const medalCards=[...document.querySelectorAll('.medal')]; const medalFilters=[...document.querySelectorAll('.medal-filter')];
+  medalFilters.forEach(button=>button.addEventListener('click',()=>{{const value=button.dataset.medalFilter;medalFilters.forEach(x=>x.classList.toggle('active',x===button));medalCards.forEach(card=>card.hidden=value!=='all'&&card.dataset.medalStatus!==value);}}));
 </script></body></html>"""
 
 

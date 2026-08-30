@@ -1,5 +1,10 @@
 """
 版本记录：
+- v1.4.0 / 2026-08-30
+  - 状态结构升级到 1.4，初始化 70 项技能和 27 枚固定勋章。
+  - 修复申论验证未同步写入答题册，并增加跨记录一致性校验。
+  - 增加赛季归档与新赛季重新定级命令，保留长期学习事实。
+
 - v1.3.1 / 2026-08-30
   - 校验技能的可选近期实测快照，区分行测正确率、申论得分率与熟练度检查项。
 
@@ -35,8 +40,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "1.3"
-RULESET_VERSION = "1.3.0"
+try:
+    from scripts.catalogs import (
+        default_medals,
+        default_skills,
+        merge_default_catalogs,
+        refresh_medals,
+    )
+except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
+    from catalogs import (
+        default_medals,
+        default_skills,
+        merge_default_catalogs,
+        refresh_medals,
+    )
+
+try:
+    from scripts.rankings import refresh_rankings
+except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
+    from rankings import refresh_rankings
+
+SCHEMA_VERSION = "1.4"
+RULESET_VERSION = "1.4.0"
 STATE_ENV_VAR = "GONGKAO_SEASON_COACH_STATE"
 LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -58,7 +83,7 @@ DAILY_QUEST_STATUSES = {
     "revealed",
 }
 REWARD_STATUSES = {"unrevealed", "revealed"}
-SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2"}
+SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2", "1.3"}
 
 
 class StateError(RuntimeError):
@@ -75,7 +100,7 @@ def now_iso() -> str:
 
 
 def default_state(timestamp: str | None = None) -> dict[str, Any]:
-    """创建 schema 1.3 的空状态。"""
+    """创建 schema 1.4 的空状态。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": {
@@ -140,20 +165,32 @@ def default_state(timestamp: str | None = None) -> dict[str, Any]:
             "rank": "未定级",
             "stars": 0,
             "highest_rank": "未定级",
+            "previous_rank": "未定级",
+            "previous_stars": 0,
+            "season_effective_days": 0,
+            "season_completed_tasks": 0,
+            "challenge_progress": {},
+            "placement_progress": {
+                "xingce_current": 0,
+                "xingce_target": 2,
+                "shenlun_current": 0,
+                "shenlun_target": 2,
+            },
+            "ranking_mode": "season_only",
             "locked_catalog_ids": [],
             "locked_reward_catalog": [],
             "catalog_locked_at": None,
             "reward_catalog_locked_at": None,
             "revenge_quest": None,
         },
-        "catalog": [],
+        "catalog": default_skills(),
         "wrong_answers": [],
         "error_hunts": [],
         "shenlun_portfolio": [],
         "assessments": [],
         "module_rankings": [],
         "subject_rankings": [],
-        "medals": [],
+        "medals": default_medals(),
         "review_queue": [],
         "attendance": {
             "today_status": "not_started",
@@ -301,7 +338,7 @@ def _fill_item_defaults(items: Any, defaults: Mapping[str, Any]) -> None:
 def migrate_state(
     state: Mapping[str, Any], timestamp: str | None = None
 ) -> dict[str, Any]:
-    """把旧状态迁移到 1.3，仅补结构，不重判历史。"""
+    """把旧状态迁移到 1.4，保留历史事实并补齐固定目录。"""
     old_version = str(state.get("schema_version", ""))
     if old_version == SCHEMA_VERSION:
         migrated = copy.deepcopy(dict(state))
@@ -349,10 +386,27 @@ def migrate_state(
         season["campaign_id"] = campaign_id
     if campaign_id and not season.get("season_id"):
         season["season_id"] = f"{campaign_id}:season-{season.get('number', 1)}"
-    season["ruleset_version"] = old_season_ruleset or (
+    previous_season_ruleset = old_season_ruleset or (
         "1.1.0" if old_version == "1.1" else f"legacy-{old_version}"
     )
+    season["ruleset_version"] = RULESET_VERSION
+    season["ranking_mode"] = "legacy_current"
     season_id = season.get("season_id")
+    quest = migrated["daily_quest"]
+    for option in quest.get("options", []):
+        if isinstance(option, dict):
+            option.setdefault("ruleset_version", previous_season_ruleset)
+    if isinstance(quest.get("locked_conditions"), dict):
+        quest["locked_conditions"].setdefault(
+            "ruleset_version", previous_season_ruleset
+        )
+    for historical_task in migrated.get("task_history", []):
+        if isinstance(historical_task, dict) and isinstance(
+            historical_task.get("locked_conditions"), dict
+        ):
+            historical_task["locked_conditions"].setdefault(
+                "ruleset_version", previous_season_ruleset
+            )
 
     goal_contract = migrated["goal_contract"]
     if not goal_contract.get("campaign_id"):
@@ -383,6 +437,7 @@ def migrate_state(
             "evidence": [],
             "last_tested_at": None,
             "next_review_at": None,
+            "needs_retest": False,
         },
         "wrong_answers": {
             "date": None,
@@ -412,6 +467,10 @@ def migrate_state(
             "score": None,
             "score_source": None,
             "dimensions": {},
+            "answer_text": None,
+            "feedback": None,
+            "word_count": None,
+            "time_minutes": None,
         },
         "assessments": {
             "date": None,
@@ -452,9 +511,13 @@ def migrate_state(
         },
         "medals": {
             "name": None,
+            "category": "历史",
             "description": None,
             "status": "locked",
             "condition": {},
+            "progress_current": 0,
+            "progress_target": 1,
+            "progress_unit": "项",
             "evidence_refs": [],
             "unlocked_at": None,
         },
@@ -607,15 +670,220 @@ def migrate_state(
                 reward["ranked"] = True
 
     migration_time = timestamp or now_iso()
+    merge_default_catalogs(migrated)
+    repaired, unresolved = _sync_shenlun_portfolio(migrated, strict=False)
+    refresh_medals(migrated, migration_time)
     engine["migration_history"].append(
         {
             "from_schema": old_version,
             "to_schema": SCHEMA_VERSION,
             "migrated_at": migration_time,
             "historical_results_rejudged": False,
+            "previous_season_ruleset": previous_season_ruleset,
+            "shenlun_portfolio_repaired": repaired,
+            "shenlun_portfolio_unresolved": unresolved,
         }
     )
     return migrated
+
+
+def _verified_shenlun_tasks(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    tasks = [
+        item for item in state.get("task_history", []) if isinstance(item, Mapping)
+    ]
+    quest = state.get("daily_quest")
+    if isinstance(quest, Mapping) and quest.get("verification"):
+        tasks.append(quest)
+    return [
+        item
+        for item in tasks
+        if isinstance(item.get("locked_conditions"), Mapping)
+        and item["locked_conditions"].get("subject") == "申论"
+        and item.get("verification")
+        and item.get("submission_refs")
+    ]
+
+
+def _sync_shenlun_portfolio(
+    state: dict[str, Any], *, strict: bool
+) -> tuple[int, list[str]]:
+    """把已验证申论提交同步进答题册，并报告缺少原文的旧记录。"""
+    portfolio = state.setdefault("shenlun_portfolio", [])
+    by_submission = {
+        item.get("submission_ref"): item
+        for item in portfolio
+        if isinstance(item, dict) and item.get("submission_ref")
+    }
+    repaired = 0
+    unresolved: list[str] = []
+    for task in _verified_shenlun_tasks(state):
+        locked = task["locked_conditions"]
+        verification = task.get("verification") or {}
+        if not isinstance(verification, Mapping):
+            verification = {}
+        answer_text = verification.get("answer_text") or verification.get(
+            "submission_text"
+        )
+        for submission_ref in task.get("submission_refs", []):
+            if not isinstance(submission_ref, str) or not submission_ref:
+                continue
+            item = by_submission.get(submission_ref)
+            if item is None and (
+                not isinstance(answer_text, str) or not answer_text.strip()
+            ):
+                unresolved.append(submission_ref)
+                continue
+            if item is None:
+                item = {
+                    "portfolio_id": f"portfolio:{submission_ref}",
+                    "campaign_id": task.get("campaign_id")
+                    or state.get("campaign", {}).get("campaign_id"),
+                    "season_id": task.get("season_id")
+                    or state.get("season", {}).get("season_id"),
+                    "date": task.get("date"),
+                    "task_type": locked.get("task_type") or locked.get("type"),
+                    "prompt_ref": locked.get("prompt_ref"),
+                    "submission_ref": submission_ref,
+                    "score": verification.get("score"),
+                    "score_source": verification.get("score_source"),
+                    "dimensions": copy.deepcopy(verification.get("dimensions", {})),
+                    "answer_text": answer_text,
+                    "feedback": verification.get("feedback"),
+                    "word_count": verification.get("word_count"),
+                    "time_minutes": verification.get("time_minutes"),
+                }
+                portfolio.append(item)
+                by_submission[submission_ref] = item
+                repaired += 1
+            elif isinstance(answer_text, str):
+                item["answer_text"] = answer_text
+                for key in (
+                    "feedback",
+                    "word_count",
+                    "time_minutes",
+                    "score",
+                    "score_source",
+                    "dimensions",
+                ):
+                    if verification.get(key) is not None:
+                        item[key] = copy.deepcopy(verification[key])
+            if isinstance(task.get("verification"), dict):
+                changes = task["verification"].setdefault("portfolio_changes", [])
+                if item["portfolio_id"] not in changes:
+                    changes.append(item["portfolio_id"])
+    if strict and unresolved:
+        raise StateError(
+            f"已验证申论任务缺少可写入答题册的作答原文：{sorted(set(unresolved))}"
+        )
+    return repaired, sorted(set(unresolved))
+
+
+def start_new_season(
+    state: Mapping[str, Any],
+    *,
+    start_date: str,
+    end_date: str,
+    theme: str | None = None,
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """归档当前赛季并建立一个从未定级开始的新赛季。"""
+    next_state = copy.deepcopy(dict(state))
+    validate_state(next_state)
+    season = next_state["season"]
+    old_season_id = season.get("season_id")
+    if old_season_id and season.get("status") != "preseason":
+        if any(
+            item.get("season_id") == old_season_id
+            for item in next_state["season_history"]
+        ):
+            raise StateError(f"赛季已经归档：{old_season_id}")
+        next_state["season_history"].append(
+            {
+                "season_id": old_season_id,
+                "campaign_id": season.get("campaign_id"),
+                "number": season.get("number"),
+                "ruleset_version": season.get("ruleset_version"),
+                "start_date": season.get("start_date"),
+                "end_date": season.get("end_date"),
+                "rank": season.get("rank"),
+                "stars": season.get("stars"),
+                "trophy": {
+                    "module_rankings": copy.deepcopy(next_state["module_rankings"]),
+                    "subject_rankings": copy.deepcopy(next_state["subject_rankings"]),
+                },
+                "settled_at": timestamp or now_iso(),
+            }
+        )
+    previous_rank = season.get("rank", "未定级")
+    previous_stars = season.get("stars", 0)
+    current_number = int(season.get("number") or 1)
+    number = (
+        current_number if season.get("status") == "preseason" else current_number + 1
+    )
+    campaign_id = next_state.get("campaign", {}).get("campaign_id")
+    new_season_id = f"{campaign_id or 'campaign'}:season-{number}"
+    season.update(
+        {
+            "season_id": new_season_id,
+            "campaign_id": campaign_id,
+            "number": number,
+            "status": "active",
+            "phase": "placement",
+            "ruleset_version": RULESET_VERSION,
+            "start_date": start_date,
+            "end_date": end_date,
+            "theme": theme,
+            "rank": "未定级",
+            "stars": 0,
+            "previous_rank": previous_rank,
+            "previous_stars": previous_stars,
+            "season_effective_days": 0,
+            "season_completed_tasks": 0,
+            "challenge_progress": {},
+            "placement_progress": {
+                "xingce_current": 0,
+                "xingce_target": 2,
+                "shenlun_current": 0,
+                "shenlun_target": 2,
+            },
+            "ranking_mode": "season_only",
+            "locked_catalog_ids": [],
+            "locked_reward_catalog": [],
+            "catalog_locked_at": None,
+            "reward_catalog_locked_at": None,
+            "revenge_quest": None,
+        }
+    )
+    next_state["module_rankings"] = []
+    next_state["subject_rankings"] = []
+    next_state["daily_quest"] = copy.deepcopy(default_state()["daily_quest"])
+    try:
+        season_start = datetime.fromisoformat(start_date).date()
+    except ValueError as exc:
+        raise StateError("新赛季 start_date 必须使用 YYYY-MM-DD。") from exc
+    try:
+        season_end = datetime.fromisoformat(end_date).date()
+    except ValueError as exc:
+        raise StateError("新赛季 end_date 必须使用 YYYY-MM-DD。") from exc
+    if season_end < season_start:
+        raise StateError("新赛季 end_date 不能早于 start_date。")
+    season["length_days"] = (season_end - season_start).days + 1
+    for skill in next_state["catalog"]:
+        last_tested_at = skill.get("last_tested_at")
+        needs_retest = skill.get("status") in {"owned", "mastered"}
+        if isinstance(last_tested_at, str):
+            try:
+                tested_date = datetime.fromisoformat(
+                    last_tested_at.replace("Z", "+00:00")
+                ).date()
+                needs_retest = (season_start - tested_date).days > 30
+            except ValueError:
+                needs_retest = True
+        skill["needs_retest"] = needs_retest
+    refresh_rankings(next_state, timestamp or now_iso())
+    refresh_medals(next_state, timestamp or now_iso())
+    validate_state(next_state)
+    return next_state
 
 
 def _require_type(value: Any, expected: type | tuple[type, ...], label: str) -> None:
@@ -674,7 +942,7 @@ def _require_item_fields(items: Any, fields: Iterable[str], label: str) -> None:
 
 
 def validate_state(state: Mapping[str, Any]) -> None:
-    """校验 schema 1.3 的关键类型、唯一约束与业务不变量。"""
+    """校验 schema 1.4 的关键类型、唯一约束与业务不变量。"""
     _require_type(state, Mapping, "state")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise StateError(
@@ -764,6 +1032,10 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "score",
             "score_source",
             "dimensions",
+            "answer_text",
+            "feedback",
+            "word_count",
+            "time_minutes",
         ),
         "assessments": (
             "assessment_id",
@@ -814,9 +1086,13 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "medals": (
             "medal_id",
             "name",
+            "category",
             "description",
             "status",
             "condition",
+            "progress_current",
+            "progress_target",
+            "progress_unit",
             "evidence_refs",
             "unlocked_at",
         ),
@@ -1079,6 +1355,29 @@ def validate_state(state: Mapping[str, Any]) -> None:
         if option.get("offer_id") != quest.get("offer_id"):
             raise StateError("任务选项的 offer_id 必须等于 daily_quest.offer_id。")
     _require_unique(option_ids, "daily_quest.options.task_id")
+    fixed_medal_ids = {item["medal_id"] for item in default_medals()}
+    locked_medal_ids = {
+        item.get("medal_id")
+        for item in state["medals"]
+        if item.get("status") == "locked" and item.get("medal_id") in fixed_medal_ids
+    }
+    if locked_medal_ids:
+        for index, option in enumerate(quest["options"]):
+            option_ruleset = option.get("ruleset_version") or state["season"].get(
+                "ruleset_version"
+            )
+            if option_ruleset != RULESET_VERSION:
+                continue
+            targets = option.get("medal_targets")
+            if not isinstance(targets, list) or not targets:
+                raise StateError(
+                    f"daily_quest.options[{index}] 必须推进至少一枚未点亮勋章。"
+                )
+            unknown = set(targets) - locked_medal_ids
+            if unknown:
+                raise StateError(
+                    f"daily_quest.options[{index}].medal_targets 无效：{sorted(unknown)}"
+                )
     accepted_task_id = quest.get("accepted_task_id")
     if accepted_task_id is not None:
         if accepted_task_id not in option_ids:
@@ -1175,11 +1474,17 @@ def validate_state(state: Mapping[str, Any]) -> None:
     error_hunt_ids = _collection_ids(
         state["error_hunts"], "error_hunt_id", "error_hunts"
     )
-    _collection_ids(
+    portfolio_ids = _collection_ids(
         state["shenlun_portfolio"],
         "portfolio_id",
         "shenlun_portfolio",
     )
+    portfolio_submission_refs = [
+        item.get("submission_ref")
+        for item in state["shenlun_portfolio"]
+        if item.get("submission_ref") is not None
+    ]
+    _require_unique(portfolio_submission_refs, "shenlun_portfolio.submission_ref")
     _collection_ids(state["module_rankings"], "ranking_id", "module_rankings")
     _collection_ids(state["subject_rankings"], "ranking_id", "subject_rankings")
     _collection_ids(state["medals"], "medal_id", "medals")
@@ -1211,7 +1516,40 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "assessment_id",
         "assessments",
     )
+    standard_skills = [
+        item for item in state["catalog"] if item.get("tier") == "standard"
+    ]
+    expected_skill_ids = {item["id"] for item in default_skills()}
+    if {item.get("id") for item in standard_skills} != expected_skill_ids:
+        raise StateError("catalog 必须完整包含 70 项标准技能。")
+    expected_medal_ids = {item["medal_id"] for item in default_medals()}
+    if not expected_medal_ids.issubset(
+        {item.get("medal_id") for item in state["medals"]}
+    ):
+        raise StateError("medals 必须完整包含 27 枚固定勋章。")
     for index, skill in enumerate(state["catalog"]):
+        status = skill.get("status")
+        if status not in {"silhouette", "discovered", "owned", "mastered"}:
+            raise StateError(f"catalog[{index}].status 无效。")
+        if (
+            skill.get("tier") == "standard"
+            and not skill.get("legacy_status", False)
+            and status in {"owned", "mastered"}
+        ):
+            if not skill.get("thresholds"):
+                raise StateError(
+                    f"catalog[{index}] 未锁定熟练度门槛，最高只能为练习中。"
+                )
+            forms = skill.get("forms", {})
+            exam_ready = (
+                forms.get("transfer") is True
+                if skill.get("subject") == "申论"
+                else forms.get("timed") is True and forms.get("mixed") is True
+            )
+            if not exam_ready:
+                raise StateError(f"catalog[{index}] 尚未满足考场可用检查项。")
+            if status == "mastered" and forms.get("retained") is not True:
+                raise StateError(f"catalog[{index}] 未通过延迟复测，不能稳定掌握。")
         performance = skill.get("recent_performance")
         if performance is None:
             continue
@@ -1263,7 +1601,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
         if rank_delta and not assessment.get("ranked", False):
             raise StateError(f"assessments[{index}] 非 ranked 但改变了星级。")
         if assessment.get("ruleset_version") == RULESET_VERSION and rank_delta:
-            raise StateError("1.3 规则使用滚动战绩计算段位，rank_delta 必须为 0。")
+            raise StateError("1.4 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
     _require_unique(assessment_ids, "assessments.assessment_id")
 
     for index, wrong in enumerate(state["wrong_answers"]):
@@ -1345,6 +1683,13 @@ def validate_state(state: Mapping[str, Any]) -> None:
                     f"{collection_name}[{index}] 引用了不存在的战绩："
                     f"{sorted(unknown_assessments)}"
                 )
+            current_refs = {
+                item["assessment_id"]
+                for item in state["assessments"]
+                if item.get("season_id") == state["season"].get("season_id")
+            }
+            if set(ranking.get("assessment_refs", [])) - current_refs:
+                raise StateError(f"{collection_name}[{index}] 不得使用旧赛季战绩定级。")
             if collection_name == "module_rankings":
                 module_ranking_keys.append(
                     (ranking.get("subject"), ranking.get("module"))
@@ -1360,6 +1705,33 @@ def validate_state(state: Mapping[str, Any]) -> None:
     for index, medal in enumerate(state["medals"]):
         if medal.get("status") not in {"locked", "unlocked"}:
             raise StateError(f"medals[{index}].status 无效。")
+        for field in ("progress_current", "progress_target"):
+            value = medal.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise StateError(f"medals[{index}].{field} 必须是非负整数。")
+
+    portfolio_id_set = set(portfolio_ids)
+    portfolio_by_id = {
+        item["portfolio_id"]: item for item in state["shenlun_portfolio"]
+    }
+    for task in _verified_shenlun_tasks(state):
+        locked = task["locked_conditions"]
+        verification = task.get("verification") or {}
+        changes = verification.get("portfolio_changes", [])
+        for submission_ref in task.get("submission_refs", []):
+            expected_id = f"portfolio:{submission_ref}"
+            if expected_id not in portfolio_id_set:
+                raise StateError(f"已验证申论任务缺少答题册记录：{submission_ref}")
+            task_ruleset = locked.get("ruleset_version") or state["season"].get(
+                "ruleset_version"
+            )
+            if task_ruleset == RULESET_VERSION and expected_id not in changes:
+                raise StateError(f"申论验证结果未声明 portfolio_changes：{expected_id}")
+            answer_text = portfolio_by_id[expected_id].get("answer_text")
+            if task_ruleset == RULESET_VERSION and (
+                not isinstance(answer_text, str) or not answer_text.strip()
+            ):
+                raise StateError(f"申论答题册缺少作答原文：{expected_id}")
 
 
 class FileLock(AbstractContextManager["FileLock"]):
@@ -1584,6 +1956,22 @@ def commit_candidate(
             current["engine"].get("migration_history", [])
         )
 
+        merge_default_catalogs(next_state)
+        _sync_shenlun_portfolio(next_state, strict=True)
+        current_season_id = next_state["season"].get("season_id")
+        next_state["season"]["season_effective_days"] = sum(
+            record.get("season_id") == current_season_id
+            and record.get("counts_as_effective")
+            for record in next_state["attendance"].get("records", [])
+        )
+        next_state["season"]["season_completed_tasks"] = sum(
+            task.get("season_id") == current_season_id
+            and bool(task.get("verification"))
+            for task in next_state["task_history"]
+        )
+        if next_state["season"].get("ranking_mode") == "season_only":
+            refresh_rankings(next_state, next_engine["updated_at"])
+        refresh_medals(next_state, next_engine["updated_at"])
         _ensure_history_preserved(current, next_state)
         validate_state(next_state)
         _atomic_write(state_path, next_state, backup=True)
@@ -1591,7 +1979,7 @@ def commit_candidate(
 
 
 def migrate_file(state_path: Path, timestamp: str | None = None) -> dict[str, Any]:
-    """备份后把旧结构迁移到 1.3。"""
+    """备份后把旧结构迁移到 1.4。"""
     with FileLock(_lock_path(state_path)):
         current = read_json(state_path)
         if current.get("schema_version") == SCHEMA_VERSION:
@@ -1614,6 +2002,33 @@ def migrate_file(state_path: Path, timestamp: str | None = None) -> dict[str, An
         validate_state(migrated)
         _atomic_write(state_path, migrated, backup=True)
         return _summary(state_path, migrated, "migrated")
+
+
+def start_new_season_file(
+    state_path: Path,
+    *,
+    start_date: str,
+    end_date: str,
+    theme: str | None,
+    event_id: str,
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """原子归档当前赛季并开启下一赛季。"""
+    current = read_current_state(state_path)
+    candidate = start_new_season(
+        current,
+        start_date=start_date,
+        end_date=end_date,
+        theme=theme,
+        timestamp=timestamp,
+    )
+    return commit_candidate(
+        state_path,
+        candidate,
+        expected_revision=current["engine"]["state_revision"],
+        event_id=event_id,
+        timestamp=timestamp,
+    )
 
 
 def recover_from_backup(
@@ -1679,6 +2094,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="只校验正式状态")
     subparsers.add_parser("migrate", help="备份并迁移旧状态")
 
+    season_parser = subparsers.add_parser("new-season", help="归档当前赛季并重新定级")
+    season_parser.add_argument("--start-date", required=True)
+    season_parser.add_argument("--end-date", required=True)
+    season_parser.add_argument("--theme")
+    season_parser.add_argument("--event-id", required=True)
+
     commit_parser = subparsers.add_parser("commit", help="原子提交完整候选状态")
     commit_parser.add_argument("--input", required=True, help="候选 JSON 文件")
     commit_parser.add_argument("--expected-revision", required=True, type=int)
@@ -1705,6 +2126,16 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(_summary(state_path, state, "valid"))
         elif args.command == "migrate":
             _print_json(migrate_file(state_path))
+        elif args.command == "new-season":
+            _print_json(
+                start_new_season_file(
+                    state_path,
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    theme=args.theme,
+                    event_id=args.event_id,
+                )
+            )
         elif args.command == "commit":
             candidate = read_json(Path(args.input).expanduser().resolve())
             _print_json(

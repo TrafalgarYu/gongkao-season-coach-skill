@@ -2,7 +2,7 @@
 
 把公务员考试行测与申论备考组织成 14–28 天的短赛季。它用真实答案、正确率、用时、订正和复测作为能力证据，提供每日三选一任务、技能总览、错题本、易错点、战绩、申论答题册、段位、勋章墙和赛季结算。
 
-当前版本：规则协议 `1.3.0`，状态结构 `1.3`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在本机。
+当前版本：规则协议 `1.4.0`，状态结构 `1.4`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在本机。
 
 ## 设计边界
 
@@ -19,7 +19,7 @@
 python -X utf8 scripts/dashboard.py
 ```
 
-默认输出到状态文件同目录的 `dashboard.html`。页面有技能总览、错题本、易错点、战绩、申论答题册和勋章墙六个栏目。技能总览分别显示熟练度检查和近期正确率或得分率；战绩显示模块、科目和综合段位。
+默认输出到状态文件同目录的 `dashboard.html`。页面有技能总览、错题本、易错点、战绩、申论答题册和勋章墙六个栏目。技能总览固定展示 70 项标准技能，勋章墙固定展示 27 枚勋章；战绩同时显示本赛季、上赛季、历史最高段位和重新定级进度。
 
 保持页面随状态文件更新：
 
@@ -107,6 +107,14 @@ python scripts/state_store.py validate
 python scripts/state_store.py migrate
 ```
 
+结算旧赛季后开启新赛季：
+
+```bash
+python scripts/state_store.py new-season --start-date 2026-09-01 --end-date 2026-09-28 --theme 限时稳定 --event-id season:2
+```
+
+新赛季保留技能、错题、申论答题册、勋章和历史战绩，当前模块、科目与综合段位回到未定级并只使用新赛季排位重新计算。
+
 ## 项目结构
 
 ```text
@@ -118,13 +126,16 @@ python scripts/state_store.py migrate
 │   ├── state-schema.md
 │   └── task-and-reward-engine.md
 ├── scripts/
+│   ├── catalogs.py
 │   ├── dashboard.py
 │   ├── progression.py
+│   ├── rankings.py
 │   ├── state_store.py
 │   └── validate_project.py
 └── tests/
     ├── test_dashboard.py
     ├── test_progression.py
+    ├── test_rankings.py
     ├── test_state_store.py
     └── fixtures/state-v1.0.json
 ```
