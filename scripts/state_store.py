@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.7.3 / 2026-08-31
+  - 赛季切换前归档当前已接取任务，避免重置 daily_quest 后历史奖励失去任务引用。
 - v1.7.2 / 2026-08-31
   - 赛季改为由用户自行设置起止日期，不再限制为 14 个自然日。
   - 赛季到期可结算为等待状态，归档旧段位与赛季成就快照并清空当前进度。
@@ -1107,7 +1109,47 @@ def _archive_current_season(
     )
 
 
+def _archive_daily_quest(state: dict[str, Any]) -> None:
+    """在重置每日任务前保留当前已接取任务的历史事实。"""
+    quest = state.get("daily_quest")
+    if not isinstance(quest, Mapping):
+        return
+    task_id = quest.get("accepted_task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return
+    if any(
+        isinstance(item, Mapping) and item.get("task_id") == task_id
+        for item in state.get("task_history", [])
+    ):
+        return
+    locked_conditions = quest.get("locked_conditions")
+    if not isinstance(locked_conditions, Mapping):
+        raise StateError("已接取任务缺少 locked_conditions，无法随赛季归档。")
+    date = quest.get("date")
+    if not isinstance(date, str) or not date:
+        raise StateError("已接取任务缺少日期，无法随赛季归档。")
+    season = state.get("season", {})
+    campaign = state.get("campaign", {})
+    state.setdefault("task_history", []).append(
+        {
+            "task_id": task_id,
+            "campaign_id": locked_conditions.get(
+                "campaign_id",
+                season.get("campaign_id") or campaign.get("campaign_id"),
+            ),
+            "season_id": locked_conditions.get("season_id", season.get("season_id")),
+            "date": date,
+            "status": quest.get("status"),
+            "locked_conditions": copy.deepcopy(dict(locked_conditions)),
+            "submission_refs": copy.deepcopy(quest.get("submission_refs", [])),
+            "verification": copy.deepcopy(quest.get("verification")),
+            "reward_id": quest.get("reward_bundle_id"),
+        }
+    )
+
+
 def _reset_current_season_progress(state: dict[str, Any]) -> None:
+    _archive_daily_quest(state)
     state["module_rankings"] = []
     state["subject_rankings"] = []
     state["daily_quest"] = copy.deepcopy(default_state()["daily_quest"])

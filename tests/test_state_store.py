@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.7.3 / 2026-08-31
+  - 覆盖赛季切换前归档当前已接取任务，确保历史奖励仍能找到对应任务。
 - v1.7.2 / 2026-08-31
   - 验证用户可自定赛季起止日期，旧赛季成就归档且新赛季重新归零。
 - v1.7.1 / 2026-08-31
@@ -727,6 +729,81 @@ class StateStoreTests(unittest.TestCase):
         state["daily_quest"]["options"][0]["medal_targets"] = ["unknown-medal"]
         with self.assertRaisesRegex(state_store.StateError, "medal_targets 无效"):
             state_store.validate_state(state)
+
+    def test_new_season_archives_current_accepted_task_before_reset(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        state["campaign"]["campaign_id"] = "campaign-1"
+        state["season"].update(
+            {
+                "season_id": "campaign-1:season-1",
+                "campaign_id": "campaign-1",
+                "status": "preseason",
+                "phase": "calibration",
+            }
+        )
+        task_id = "task-current"
+        reward_id = "reward:task-current"
+        state["daily_quest"].update(
+            {
+                "date": "2026-08-31",
+                "status": "reward_ready",
+                "offer_id": "offer-current",
+                "options": [
+                    {
+                        "task_id": task_id,
+                        "offer_id": "offer-current",
+                        "ruleset_version": "1.5.0",
+                    }
+                ],
+                "accepted_task_id": task_id,
+                "accepted_at": TIMESTAMP,
+                "locked_conditions": {
+                    "campaign_id": "campaign-1",
+                    "season_id": "campaign-1:season-1",
+                    "subject": "行测",
+                },
+                "submission_refs": ["evidence-current"],
+                "verification": {"task_result": "pass"},
+                "reward_bundle_id": reward_id,
+            }
+        )
+        state["economy"]["reward_bundles"].append(
+            {
+                "reward_id": reward_id,
+                "campaign_id": "campaign-1",
+                "season_id": "campaign-1:season-1",
+                "date": "2026-08-31",
+                "task_id": task_id,
+                "submission_refs": ["evidence-current"],
+                "task_result": "pass",
+                "attendance_awarded": True,
+                "ability_changes": [],
+                "error_hunt_changes": [],
+                "ranked": False,
+                "rank_delta": 0,
+                "command_points_delta": 0,
+                "set_progress": [],
+                "status": "revealed",
+                "created_at": TIMESTAMP,
+                "revealed_at": TIMESTAMP,
+            }
+        )
+
+        next_state = state_store.start_new_season(
+            state,
+            start_date="2026-08-01",
+            end_date="2027-04-30",
+            theme="2026年8月—2027年4月备考季",
+            timestamp=TIMESTAMP,
+        )
+
+        archived = next(
+            item for item in next_state["task_history"] if item["task_id"] == task_id
+        )
+        self.assertEqual(archived["reward_id"], reward_id)
+        self.assertEqual(archived["submission_refs"], ["evidence-current"])
+        self.assertEqual(next_state["daily_quest"]["status"], "not_generated")
+        self.assertEqual(next_state["economy"]["reward_bundles"][0]["task_id"], task_id)
 
     def test_settled_season_waits_for_user_dates_and_keeps_archive(self) -> None:
         state = state_store.default_state(TIMESTAMP)
