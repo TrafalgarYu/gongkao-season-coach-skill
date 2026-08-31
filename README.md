@@ -2,7 +2,7 @@
 
 把公务员考试行测与申论备考组织成由用户设定起止日期的备考赛季，每季独立排位。它用真实答案、正确率、用时、订正和复测作为能力证据，提供每日三选一任务、技能总览、错题类型统计、战绩、申论答题册、段位、勋章墙和赛季结算。
 
-当前版本：规则协议 `1.7.0`，状态结构 `1.7`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在本机。
+当前版本：规则协议 `1.7.0`，状态结构 `1.7`。支持 Hermes Agent 与 OpenAI Codex，状态只保存在用户明确配置的唯一主路径，不写入 Git。
 
 ## 为什么设计它
 
@@ -98,6 +98,14 @@ hermes skills install https://raw.githubusercontent.com/TrafalgarYu/gongkao-seas
 4. 操作系统的用户数据目录。
 
 发现两个候选主状态时脚本会停止，避免自动覆盖。已有 `~/.hermes/data/gongkao-season-coach/state.json` 不会被擅自搬迁。
+
+Hermes 云端实例的统一主状态路径为：
+
+```text
+/home/ubuntu/.hermes/data/gongkao-season-coach/state.json
+```
+
+该文件是唯一正在使用的主记录；同目录的 `state.backup.json` 和 `state.pre-*.json` 只用于回滚或审计，不作为另一份记录。云端 Skill、只读看板和 Hermes 命令都指向这一路径，不能另建第二个 `state.json`。
 
 查看实际路径：
 
