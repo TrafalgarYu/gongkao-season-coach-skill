@@ -1,5 +1,9 @@
 """
 版本记录：
+- v1.6.0 / 2026-08-31
+  - 用五个行测模块的 25 枚正确率与用时勋章替换模糊的“考场可用”勋章。
+  - 新增练习战绩判定，并把固定勋章目录调整为 40 枚。
+  - 迁移时只按可核验事实重建勋章，不保留重复的旧勋章目录。
 - v1.4.1 / 2026-08-30
   - 修复旧版已掌握技能合并固定目录时未获得 legacy_status 豁免的问题。
   - 保留旧技能的掌握事实，并避免空门槛记录阻断 1.4 状态迁移。
@@ -101,6 +105,23 @@ SKILL_GROUPS = {
     ],
 }
 
+XINGCE_MODULE_IDS = {
+    "资料分析": "data",
+    "数量关系": "math",
+    "言语理解": "verbal",
+    "判断推理": "reasoning",
+    "常识判断": "knowledge",
+}
+
+PERFORMANCE_TIERS = (
+    ("starter", "崭露头角", 70, 90),
+    ("surge", "势如破竹", 80, 80),
+    ("elite", "百里挑一", 90, 70),
+    ("peak", "登峰造极", 95, 60),
+    ("peerless", "天下无双", 100, 55),
+)
+MIN_MEDAL_QUESTIONS = 10
+
 
 def _slug(index: int) -> str:
     return f"skill-{index:02d}"
@@ -153,10 +174,14 @@ def _medal(
     *,
     scope: str = "career",
     module: str | None = None,
+    condition_extra: dict[str, Any] | None = None,
+    progress_unit: str = "项",
 ) -> dict[str, Any]:
     condition = {"type": condition_type, "target": target, "scope": scope}
     if module:
         condition["module"] = module
+    if condition_extra:
+        condition.update(condition_extra)
     return {
         "medal_id": medal_id,
         "name": name,
@@ -166,7 +191,7 @@ def _medal(
         "condition": condition,
         "progress_current": 0,
         "progress_target": target,
-        "progress_unit": "项",
+        "progress_unit": progress_unit,
         "evidence_refs": [],
         "unlocked_at": None,
     }
@@ -208,37 +233,29 @@ def default_medals() -> list[dict[str, Any]]:
             1,
         ),
     ]
-    module_ids = {
-        "资料分析": "data",
-        "数量关系": "math",
-        "言语理解": "verbal",
-        "判断推理": "reasoning",
-        "常识判断": "knowledge",
-        "申论": "shenlun",
-    }
-    for module, key in module_ids.items():
-        medals.append(
-            _medal(
-                f"medal-{key}-first",
-                f"{module}·初次上阵",
-                "模块",
-                f"{module}至少 1 项技能达到考场可用",
-                "module_usable",
-                1,
-                module=module,
+    for module, key in XINGCE_MODULE_IDS.items():
+        for tier_id, tier_name, accuracy_min, seconds_max in PERFORMANCE_TIERS:
+            medals.append(
+                _medal(
+                    f"medal-{key}-{tier_id}",
+                    f"{module}·{tier_name}",
+                    "模块战绩",
+                    (
+                        f"单次至少 {MIN_MEDAL_QUESTIONS} 题，正确率不低于 "
+                        f"{accuracy_min}%，平均每题不超过 {seconds_max} 秒"
+                    ),
+                    "module_performance",
+                    1,
+                    module=module,
+                    condition_extra={
+                        "accuracy_min": accuracy_min,
+                        "seconds_per_question_max": seconds_max,
+                        "question_count_min": MIN_MEDAL_QUESTIONS,
+                        "tier": tier_id,
+                    },
+                    progress_unit="次达标",
+                )
             )
-        )
-        medals.append(
-            _medal(
-                f"medal-{key}-all",
-                f"{module}·全线可用",
-                "模块",
-                f"{module}全部标准技能达到考场可用",
-                "module_all_usable",
-                len(SKILL_GROUPS[("申论" if module == "申论" else "行测", module)]),
-                module=module,
-            )
-        )
     medals.extend(
         [
             _medal(
@@ -326,12 +343,11 @@ def default_medals() -> list[dict[str, Any]]:
             ),
             _medal(
                 "medal-core-mastered",
-                "核心全稳",
+                "五路全能",
                 "赛季",
-                "本赛季重点技能全部稳定掌握",
-                "core_mastered",
-                1,
-                scope="season",
+                "五个行测模块均至少达到百里挑一标准",
+                "five_modules_elite",
+                5,
             ),
         ]
     )
@@ -383,7 +399,6 @@ def merge_default_catalogs(state: dict[str, Any]) -> None:
         if isinstance(item, dict)
     }
     merged_medals = []
-    fixed_medal_ids = {item["medal_id"] for item in default_medals()}
     for default in default_medals():
         current = existing_medals.get(default["medal_id"])
         item = copy.deepcopy(default)
@@ -400,27 +415,6 @@ def merge_default_catalogs(state: dict[str, Any]) -> None:
             if was_unlocked:
                 item["status"] = "unlocked"
         merged_medals.append(item)
-    for medal_id, current in existing_medals.items():
-        if medal_id in fixed_medal_ids:
-            continue
-        legacy = copy.deepcopy(current)
-        legacy.setdefault("category", "历史")
-        legacy.setdefault("description", "旧版本保留勋章")
-        legacy.setdefault("status", "locked")
-        if not isinstance(legacy.get("condition"), dict) or not legacy["condition"].get(
-            "type"
-        ):
-            legacy["condition"] = {
-                "type": "legacy",
-                "target": 1,
-                "scope": "career",
-            }
-        legacy.setdefault("progress_current", int(legacy["status"] == "unlocked"))
-        legacy.setdefault("progress_target", 1)
-        legacy.setdefault("progress_unit", "项")
-        legacy.setdefault("evidence_refs", [])
-        legacy.setdefault("unlocked_at", None)
-        merged_medals.append(legacy)
     state["medals"] = merged_medals
 
 
@@ -451,14 +445,9 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
     sealed = [
         item for item in state.get("error_hunts", []) if item.get("status") == "sealed"
     ]
-    standard = [
-        item for item in state.get("catalog", []) if item.get("tier") == "standard"
+    practice_records = [
+        item for item in state.get("practice_records", []) if isinstance(item, dict)
     ]
-    usable_by_module = Counter(
-        item.get("module")
-        for item in standard
-        if item.get("status") in {"owned", "mastered"}
-    )
     gold_order = {
         "未定级": 0,
         "青铜": 1,
@@ -502,11 +491,20 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
         for item in season_assessments
         if item.get("conditions", {}).get("full_simulation")
     ]
-    locked_ids = set(state.get("season", {}).get("locked_catalog_ids", []))
-    core = [item for item in standard if item.get("id") in locked_ids]
-    core_mastered = bool(core) and all(
-        item.get("status") == "mastered" for item in core
-    )
+    elite_modules: dict[str, list[str]] = {}
+    for module in XINGCE_MODULE_IDS:
+        refs = [
+            str(item.get("practice_id"))
+            for item in practice_records
+            if item.get("module") == module
+            and item.get("locked_before_start") is True
+            and item.get("question_count", 0) >= MIN_MEDAL_QUESTIONS
+            and item.get("accuracy_rate", 0) >= 90
+            and item.get("seconds_per_question", float("inf")) <= 70
+            and item.get("practice_id")
+        ]
+        if refs:
+            elite_modules[module] = refs
 
     for medal in state["medals"]:
         condition = medal["condition"]
@@ -519,13 +517,20 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
             )
         elif kind == "ranked_assessments":
             current, refs = len(assessments), _assessment_refs(assessments)
-        elif kind in {"module_usable", "module_all_usable"}:
-            current = usable_by_module[condition["module"]]
-            refs = [
-                item["id"]
-                for item in standard
+        elif kind == "module_performance":
+            matches = [
+                item
+                for item in practice_records
                 if item.get("module") == condition["module"]
-                and item.get("status") in {"owned", "mastered"}
+                and item.get("locked_before_start") is True
+                and item.get("question_count", 0) >= condition["question_count_min"]
+                and item.get("accuracy_rate", 0) >= condition["accuracy_min"]
+                and item.get("seconds_per_question", float("inf"))
+                <= condition["seconds_per_question_max"]
+            ]
+            current = len(matches)
+            refs = [
+                str(item["practice_id"]) for item in matches if item.get("practice_id")
             ]
         elif kind == "resolved_wrongs":
             current, refs = len(resolved), [item["wrong_id"] for item in resolved]
@@ -558,11 +563,9 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
             )
         elif kind == "full_simulations":
             current, refs = len(full_sims), _assessment_refs(full_sims)
-        elif kind == "core_mastered":
-            current, refs = (
-                int(core_mastered),
-                [item["id"] for item in core if item.get("status") == "mastered"],
-            )
+        elif kind == "five_modules_elite":
+            current = len(elite_modules)
+            refs = [ref for values in elite_modules.values() for ref in values]
         else:
             current = 0
         if medal.get("status") == "unlocked":
@@ -582,3 +585,9 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
 
 def catalog_counts() -> dict[str, int]:
     return Counter(item["module"] for item in default_skills())
+
+
+def rebuild_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
+    """丢弃旧目录状态，只按当前固定目录和可核验事实重算。"""
+    state["medals"] = default_medals()
+    refresh_medals(state, timestamp)

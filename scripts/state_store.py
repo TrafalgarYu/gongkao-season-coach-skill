@@ -1,5 +1,9 @@
 """
 版本记录：
+- v1.6.0 / 2026-08-31
+  - 状态新增练习战绩，统一保存题量、正确数、实际用时和派生指标。
+  - 迁移时从完整旧证据提取练习战绩，并按 40 枚新目录重新计算勋章。
+  - 删除重复旧勋章，不用计划时长或缺失字段猜测历史成绩。
 - v1.5.0 / 2026-08-30
   - 将旧版复合考试成绩、申论单题评分和自定义技能迁移为统一格式。
   - 增加迁移 dry-run，固定活动技能目录为 70 项，并校验评分满分与得分率。
@@ -49,6 +53,7 @@ try:
         default_medals,
         default_skills,
         merge_default_catalogs,
+        rebuild_medals,
         refresh_medals,
     )
 except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
@@ -56,6 +61,7 @@ except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
         default_medals,
         default_skills,
         merge_default_catalogs,
+        rebuild_medals,
         refresh_medals,
     )
 
@@ -69,8 +75,8 @@ try:
 except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
     from normalization import normalize_legacy_state
 
-SCHEMA_VERSION = "1.5"
-RULESET_VERSION = "1.5.0"
+SCHEMA_VERSION = "1.6"
+RULESET_VERSION = "1.6.0"
 STATE_ENV_VAR = "GONGKAO_SEASON_COACH_STATE"
 LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -92,7 +98,16 @@ DAILY_QUEST_STATUSES = {
     "revealed",
 }
 REWARD_STATUSES = {"unrevealed", "revealed"}
-SUPPORTED_OLD_SCHEMAS = {"0.1", "0.1.1", "1.0", "1.1", "1.2", "1.3", "1.4"}
+SUPPORTED_OLD_SCHEMAS = {
+    "0.1",
+    "0.1.1",
+    "1.0",
+    "1.1",
+    "1.2",
+    "1.3",
+    "1.4",
+    "1.5",
+}
 
 
 class StateError(RuntimeError):
@@ -109,7 +124,7 @@ def now_iso() -> str:
 
 
 def default_state(timestamp: str | None = None) -> dict[str, Any]:
-    """创建 schema 1.5 的空状态。"""
+    """创建 schema 1.6 的空状态。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": {
@@ -196,6 +211,7 @@ def default_state(timestamp: str | None = None) -> dict[str, Any]:
         "wrong_answers": [],
         "error_hunts": [],
         "shenlun_portfolio": [],
+        "practice_records": [],
         "assessments": [],
         "module_rankings": [],
         "subject_rankings": [],
@@ -344,10 +360,146 @@ def _fill_item_defaults(items: Any, defaults: Mapping[str, Any]) -> None:
             item.setdefault(key, copy.deepcopy(value))
 
 
+def _legacy_metric(result: Mapping[str, Any], names: tuple[str, ...]) -> Any:
+    for name in names:
+        if name in result:
+            return result[name]
+    return None
+
+
+def _extract_legacy_practice_records(
+    state: dict[str, Any], old_version: str
+) -> dict[str, Any]:
+    """只从字段齐全的旧技能证据提取练习战绩，不推测题量或实际用时。"""
+    tasks = {
+        item.get("task_id"): item
+        for item in state.get("task_history", [])
+        if isinstance(item, Mapping) and item.get("task_id")
+    }
+    quest = state.get("daily_quest")
+    if isinstance(quest, Mapping) and quest.get("accepted_task_id"):
+        tasks[quest["accepted_task_id"]] = quest
+
+    report = {
+        "evidence_scanned": 0,
+        "practice_records_extracted": 0,
+        "skipped_missing_question_count": 0,
+        "skipped_missing_correct_count": 0,
+        "skipped_missing_duration_seconds": 0,
+    }
+    existing = {
+        item.get("practice_id"): item
+        for item in state.get("practice_records", [])
+        if isinstance(item, dict) and item.get("practice_id")
+    }
+    seen_keys = {
+        (item.get("task_id"), item.get("submission_ref"), item.get("module"))
+        for item in existing.values()
+    }
+
+    for skill in state.get("catalog", []):
+        if not isinstance(skill, Mapping) or skill.get("subject") != "行测":
+            continue
+        for evidence in skill.get("evidence", []):
+            if not isinstance(evidence, Mapping):
+                continue
+            result = evidence.get("result")
+            if not isinstance(result, Mapping):
+                continue
+            if not any(
+                key in result
+                for key in ("accuracy", "accuracy_rate", "correct", "correct_count")
+            ):
+                continue
+            report["evidence_scanned"] += 1
+            question_count = _legacy_metric(
+                result, ("question_count", "total_questions", "total")
+            )
+            correct_count = _legacy_metric(result, ("correct_count", "correct"))
+            duration_seconds = _legacy_metric(
+                result, ("duration_seconds", "elapsed_seconds", "time_seconds")
+            )
+            if question_count is None:
+                report["skipped_missing_question_count"] += 1
+            if correct_count is None:
+                report["skipped_missing_correct_count"] += 1
+            if duration_seconds is None:
+                report["skipped_missing_duration_seconds"] += 1
+            if None in (question_count, correct_count, duration_seconds):
+                continue
+            if any(
+                isinstance(value, bool) for value in (question_count, correct_count)
+            ):
+                continue
+            if not isinstance(question_count, int) or not isinstance(
+                correct_count, int
+            ):
+                continue
+            if (
+                question_count <= 0
+                or correct_count < 0
+                or correct_count > question_count
+                or isinstance(duration_seconds, bool)
+                or not isinstance(duration_seconds, (int, float))
+                or duration_seconds <= 0
+            ):
+                continue
+
+            task_id = evidence.get("task_id")
+            submission_ref = evidence.get("submission_ref") or evidence.get(
+                "evidence_id"
+            )
+            module = skill.get("module")
+            record_key = (task_id, submission_ref, module)
+            if record_key in seen_keys:
+                continue
+            task = tasks.get(task_id, {})
+            locked = task.get("locked_conditions")
+            locked_mapping = locked if isinstance(locked, Mapping) else {}
+            accuracy_rate = round(correct_count / question_count * 100, 2)
+            seconds_per_question = round(duration_seconds / question_count, 2)
+            record = {
+                "practice_id": _stable_legacy_id(
+                    "practice",
+                    {
+                        "task_id": task_id,
+                        "submission_ref": submission_ref,
+                        "module": module,
+                        "question_count": question_count,
+                        "correct_count": correct_count,
+                        "duration_seconds": duration_seconds,
+                    },
+                ),
+                "campaign_id": evidence.get("campaign_id")
+                or state.get("campaign", {}).get("campaign_id"),
+                "season_id": evidence.get("season_id")
+                or state.get("season", {}).get("season_id"),
+                "task_id": task_id,
+                "submission_ref": submission_ref,
+                "date": str(evidence.get("tested_at") or "")[:10] or None,
+                "subject": "行测",
+                "module": module,
+                "question_count": question_count,
+                "correct_count": correct_count,
+                "accuracy_rate": accuracy_rate,
+                "duration_seconds": duration_seconds,
+                "seconds_per_question": seconds_per_question,
+                "source": locked_mapping.get("source") or result.get("source"),
+                "locked_before_start": bool(locked_mapping),
+                "ruleset_version": f"legacy-{old_version}",
+            }
+            existing[record["practice_id"]] = record
+            seen_keys.add(record_key)
+            report["practice_records_extracted"] += 1
+
+    state["practice_records"] = list(existing.values())
+    return report
+
+
 def migrate_state(
     state: Mapping[str, Any], timestamp: str | None = None
 ) -> dict[str, Any]:
-    """把旧状态迁移到 1.5，保留历史事实并规范技能与评分口径。"""
+    """把旧状态迁移到 1.6，保留事实并重建量化勋章。"""
     old_version = str(state.get("schema_version", ""))
     if old_version == SCHEMA_VERSION:
         migrated = copy.deepcopy(dict(state))
@@ -484,6 +636,23 @@ def migrate_state(
             "word_count": None,
             "time_minutes": None,
         },
+        "practice_records": {
+            "campaign_id": campaign_id,
+            "season_id": season_id,
+            "task_id": None,
+            "submission_ref": None,
+            "date": None,
+            "subject": "行测",
+            "module": None,
+            "question_count": None,
+            "correct_count": None,
+            "accuracy_rate": None,
+            "duration_seconds": None,
+            "seconds_per_question": None,
+            "source": None,
+            "locked_before_start": False,
+            "ruleset_version": f"legacy-{old_version}",
+        },
         "assessments": {
             "date": None,
             "subject": None,
@@ -600,6 +769,7 @@ def migrate_state(
         "wrong_answers",
         "error_hunts",
         "shenlun_portfolio",
+        "practice_records",
         "assessments",
         "module_rankings",
         "subject_rankings",
@@ -626,6 +796,7 @@ def migrate_state(
         ("wrong_answers", "wrong_id", "wrong"),
         ("error_hunts", "error_hunt_id", "error-hunt"),
         ("shenlun_portfolio", "portfolio_id", "portfolio"),
+        ("practice_records", "practice_id", "practice"),
         ("assessments", "assessment_id", "assessment"),
         ("module_rankings", "ranking_id", "module-ranking"),
         ("subject_rankings", "ranking_id", "subject-ranking"),
@@ -693,13 +864,16 @@ def migrate_state(
         raise StateError(
             f"旧技能无法映射到固定目录，请先明确对应关系：{unresolved_custom}"
         )
-    refresh_medals(migrated, migration_time)
+    practice_migration = _extract_legacy_practice_records(migrated, old_version)
+    rebuild_medals(migrated, migration_time)
     engine["migration_history"].append(
         {
             "from_schema": old_version,
             "to_schema": SCHEMA_VERSION,
             "migrated_at": migration_time,
             "historical_results_rejudged": False,
+            "historical_medals_rebuilt": True,
+            "practice_records": practice_migration,
             "previous_season_ruleset": previous_season_ruleset,
             "shenlun_portfolio_repaired": repaired,
             "shenlun_portfolio_unresolved": unresolved,
@@ -1031,7 +1205,7 @@ def _validate_score_fields(item: Mapping[str, Any], label: str) -> None:
 
 
 def validate_state(state: Mapping[str, Any]) -> None:
-    """校验 schema 1.5 的关键类型、唯一约束与业务不变量。"""
+    """校验 schema 1.6 的关键类型、唯一约束与业务不变量。"""
     _require_type(state, Mapping, "state")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise StateError(
@@ -1055,6 +1229,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "wrong_answers",
         "error_hunts",
         "shenlun_portfolio",
+        "practice_records",
         "assessments",
         "module_rankings",
         "subject_rankings",
@@ -1128,6 +1303,24 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "feedback",
             "word_count",
             "time_minutes",
+        ),
+        "practice_records": (
+            "practice_id",
+            "campaign_id",
+            "season_id",
+            "task_id",
+            "submission_ref",
+            "date",
+            "subject",
+            "module",
+            "question_count",
+            "correct_count",
+            "accuracy_rate",
+            "duration_seconds",
+            "seconds_per_question",
+            "source",
+            "locked_before_start",
+            "ruleset_version",
         ),
         "assessments": (
             "assessment_id",
@@ -1599,6 +1792,11 @@ def validate_state(state: Mapping[str, Any]) -> None:
         "portfolio_id",
         "shenlun_portfolio",
     )
+    practice_ids = _collection_ids(
+        state["practice_records"],
+        "practice_id",
+        "practice_records",
+    )
     portfolio_submission_refs = [
         item.get("submission_ref")
         for item in state["shenlun_portfolio"]
@@ -1647,10 +1845,11 @@ def validate_state(state: Mapping[str, Any]) -> None:
     ):
         raise StateError("catalog 必须恰好包含 70 项标准技能，不得创建自定义技能。")
     expected_medal_ids = {item["medal_id"] for item in default_medals()}
-    if not expected_medal_ids.issubset(
-        {item.get("medal_id") for item in state["medals"]}
+    if (
+        len(state["medals"]) != 40
+        or {item.get("medal_id") for item in state["medals"]} != expected_medal_ids
     ):
-        raise StateError("medals 必须完整包含 27 枚固定勋章。")
+        raise StateError("medals 必须恰好包含 40 枚固定勋章。")
     for index, skill in enumerate(state["catalog"]):
         status = skill.get("status")
         if status not in {"silhouette", "discovered", "owned", "mastered"}:
@@ -1746,8 +1945,59 @@ def validate_state(state: Mapping[str, Any]) -> None:
         if rank_delta and not assessment.get("ranked", False):
             raise StateError(f"assessments[{index}] 非 ranked 但改变了星级。")
         if assessment.get("ruleset_version") == RULESET_VERSION and rank_delta:
-            raise StateError("1.5 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
+            raise StateError("1.6 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
     _require_unique(assessment_ids, "assessments.assessment_id")
+
+    xingce_modules = {"资料分析", "数量关系", "言语理解", "判断推理", "常识判断"}
+    practice_keys: list[tuple[Any, Any, Any]] = []
+    for index, record in enumerate(state["practice_records"]):
+        if (
+            record.get("subject") != "行测"
+            or record.get("module") not in xingce_modules
+        ):
+            raise StateError(f"practice_records[{index}] 科目或模块无效。")
+        question_count = record.get("question_count")
+        correct_count = record.get("correct_count")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (question_count, correct_count)
+        ):
+            raise StateError(f"practice_records[{index}] 题量与正确数必须是整数。")
+        if question_count <= 0 or not 0 <= correct_count <= question_count:
+            raise StateError(f"practice_records[{index}] 题量或正确数无效。")
+        duration = record.get("duration_seconds")
+        seconds_per_question = record.get("seconds_per_question")
+        accuracy_rate = record.get("accuracy_rate")
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
+            for value in (duration, seconds_per_question)
+        ):
+            raise StateError(f"practice_records[{index}] 实际用时无效。")
+        if (
+            isinstance(accuracy_rate, bool)
+            or not isinstance(accuracy_rate, (int, float))
+            or not 0 <= accuracy_rate <= 100
+        ):
+            raise StateError(f"practice_records[{index}] 正确率无效。")
+        expected_accuracy = round(correct_count / question_count * 100, 2)
+        expected_seconds = round(duration / question_count, 2)
+        if abs(accuracy_rate - expected_accuracy) > 0.01:
+            raise StateError(f"practice_records[{index}] 正确率与题量不一致。")
+        if abs(seconds_per_question - expected_seconds) > 0.01:
+            raise StateError(f"practice_records[{index}] 平均用时与总用时不一致。")
+        if not isinstance(record.get("locked_before_start"), bool):
+            raise StateError(
+                f"practice_records[{index}].locked_before_start 必须是布尔值。"
+            )
+        practice_keys.append(
+            (
+                record.get("task_id"),
+                record.get("submission_ref"),
+                record.get("module"),
+            )
+        )
+    _require_unique(practice_ids, "practice_records.practice_id")
+    _require_unique(practice_keys, "practice_records 任务、提交与模块")
 
     for index, wrong in enumerate(state["wrong_answers"]):
         if wrong.get("status") not in {
@@ -2047,6 +2297,7 @@ def _ensure_history_preserved(
         (("wrong_answers",), "wrong_id"),
         (("error_hunts",), "error_hunt_id"),
         (("shenlun_portfolio",), "portfolio_id"),
+        (("practice_records",), "practice_id"),
         (("assessments",), "assessment_id"),
         (("weekly_settlements",), "week_key"),
         (("task_history",), "task_id"),
@@ -2138,7 +2389,7 @@ def migrate_file(
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """校验迁移结果；非 dry-run 时备份并原子迁移到 1.5。"""
+    """校验迁移结果；非 dry-run 时备份并原子迁移到 1.6。"""
     with FileLock(_lock_path(state_path)):
         current = read_json(state_path)
         if current.get("schema_version") == SCHEMA_VERSION:
@@ -2167,6 +2418,7 @@ def migrate_file(
         result["migration_report"] = migrated["engine"]["migration_history"][-1]
         result["counts"] = {
             "skills": len(migrated["catalog"]),
+            "practice_records": len(migrated["practice_records"]),
             "assessments": len(migrated["assessments"]),
             "shenlun_portfolio": len(migrated["shenlun_portfolio"]),
             "medals": len(migrated["medals"]),

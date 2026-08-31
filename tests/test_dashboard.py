@@ -1,5 +1,7 @@
 """
 版本记录：
+- v4.0.0 / 2026-08-31
+  - 验证量化技能页、练习战绩和 40 枚新勋章目录。
 - v3.2.0 / 2026-08-31
   - 验证总览每天 08:00 更新一次，普通访问不重建，手动刷新立即生效。
 - v3.1.0 / 2026-08-30
@@ -85,6 +87,26 @@ class DashboardTests(unittest.TestCase):
                 "updated_at": None,
             }
         ]
+        state["practice_records"].append(
+            {
+                "practice_id": "practice-data-1",
+                "campaign_id": None,
+                "season_id": None,
+                "task_id": "task-data-1",
+                "submission_ref": "submission-data-1",
+                "date": "2026-08-31",
+                "subject": "行测",
+                "module": "资料分析",
+                "question_count": 10,
+                "correct_count": 9,
+                "accuracy_rate": 90,
+                "duration_seconds": 700,
+                "seconds_per_question": 70,
+                "source": "测试练习",
+                "locked_before_start": True,
+                "ruleset_version": "1.6.0",
+            }
+        )
 
         report = dashboard.render_html(
             state,
@@ -93,22 +115,24 @@ class DashboardTests(unittest.TestCase):
 
         for section in ("技能总览", "错题本", "易错点", "战绩", "申论答题册", "勋章墙"):
             self.assertIn(section, report)
-        self.assertIn("练习中", report)
-        self.assertIn("考场可用", report)
-        self.assertIn("还需完成：限时", report)
+        self.assertIn("有实测", report)
+        self.assertIn("待记录", report)
         self.assertIn("最近正确率", report)
         self.assertIn("82.5%", report)
         self.assertIn("最近 3 次同口径练习 · 共 42 题", report)
         self.assertIn("最近得分率", report)
         self.assertIn("实测数据不足", report)
-        self.assertIn("熟练度检查 1/2", report)
-        self.assertNotIn("检查项 1/2 · 50%", report)
+        self.assertNotIn("熟练度检查", report)
         self.assertIn('data-current="true"', report)
         self.assertIn("技能总数", report)
         self.assertIn("全部 70", report)
-        self.assertIn("未开始 68", report)
-        self.assertIn("全部 27", report)
-        self.assertIn("熟练度鉴定规则", report)
+        self.assertIn("待记录 69", report)
+        self.assertIn("全部 40", report)
+        self.assertIn("数据口径", report)
+        self.assertIn("练习战绩", report)
+        self.assertIn("9/10", report)
+        self.assertIn("70 秒", report)
+        self.assertIn("资料分析·百里挑一", report)
         self.assertIn("上赛季", report)
         self.assertIn("历史最高", report)
         self.assertIn("行测 0/2", report)

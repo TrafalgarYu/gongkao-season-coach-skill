@@ -1,4 +1,4 @@
 interface:
   display_name: "公考赛季教练"
-  short_description: "用技能熟练度、错题本、战绩与段位管理公考备考"
+  short_description: "用量化练习、勋章、错题本、战绩与段位管理公考备考"
   default_prompt: "使用 $gongkao-season-coach 根据我的真实成绩和可投入时间建立备考赛季。"

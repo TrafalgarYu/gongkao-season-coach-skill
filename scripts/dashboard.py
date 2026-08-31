@@ -1,5 +1,8 @@
 """
 版本记录：
+- v4.0.0 / 2026-08-31
+  - 技能页取消“考场可用”等主观标签，改为直接展示实测数据和证据量。
+  - 战绩页新增练习战绩表，勋章墙切换为 40 枚量化勋章目录。
 - v3.2.0 / 2026-08-31
   - 移除页面每 15 秒自动重载，常驻服务改为每天 08:00 生成一次快照。
   - 页面新增手动刷新入口；点击后立即读取最新状态，普通访问不再触发重建。
@@ -43,22 +46,6 @@ except ImportError:  # 直接运行 scripts/dashboard.py 时没有包上下文
     from catalogs import default_medals
     from state_store import StateError, read_current_state, resolve_state_path
 
-PROFICIENCY_LABELS = {
-    "silhouette": "未开始",
-    "discovered": "练习中",
-    "owned": "考场可用",
-    "mastered": "稳定掌握",
-}
-STATUS_ORDER = {"mastered": 0, "owned": 1, "discovered": 2, "silhouette": 3}
-CHECK_LABELS = {
-    "base": "基础",
-    "timed": "限时",
-    "mixed": "混合",
-    "retained": "延迟复测",
-    "structure": "结构",
-    "compressed": "限字",
-    "transfer": "新材料",
-}
 EASY_POINT_LABELS = {
     "spotted": "待确认",
     "identified": "已找到原因",
@@ -112,30 +99,6 @@ def _score_text(item: dict[str, Any]) -> str:
     return f"{score}/{score_max}"
 
 
-def _skill_progress(item: dict[str, Any]) -> tuple[int, int]:
-    checks = item.get("forms")
-    if not isinstance(checks, dict) or not checks:
-        return (1 if item.get("status") in {"owned", "mastered"} else 0, 1)
-    return sum(value is True for value in checks.values()), len(checks)
-
-
-def _skill_next_step(item: dict[str, Any]) -> str:
-    if item.get("needs_retest"):
-        return "需要复测：原熟练度保留，完成本赛季同口径验证后更新"
-    checks = item.get("forms")
-    if isinstance(checks, dict):
-        missing = [
-            CHECK_LABELS.get(key, key)
-            for key, value in checks.items()
-            if value is not True
-        ]
-        if missing:
-            return f"还需完成：{'、'.join(missing)}"
-    if item.get("status") == "mastered":
-        return "已经稳定掌握"
-    return f"熟练度标准：{_text(item.get('thresholds'), '尚未设置')}"
-
-
 def _format_percent(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "--"
@@ -164,16 +127,8 @@ def _skill_performance(item: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _render_skill(item: dict[str, Any], current_ids: set[str]) -> str:
-    status = str(item.get("status", "silhouette"))
-    completed, total = _skill_progress(item)
-    percent = round(completed / total * 100) if total else 0
-    checks = item.get("forms") if isinstance(item.get("forms"), dict) else {}
-    check_html = "".join(
-        f'<span class="chip {"done" if done is True else "todo"}">'
-        f"{'✓' if done is True else '○'} "
-        f"{_escape(CHECK_LABELS.get(key, key))}</span>"
-        for key, done in checks.items()
-    )
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+    status = "measured" if item.get("recent_performance") else "unmeasured"
     item_id = str(item.get("id", ""))
     current = item_id in current_ids
     metric_label, metric_value, evidence_basis = _skill_performance(item)
@@ -186,14 +141,11 @@ def _render_skill(item: dict[str, Any], current_ids: set[str]) -> str:
       <div class="card-head"><div>
         <p class="path">{_escape(item.get("subject", "未分类"))} · {_escape(item.get("module", "未分组"))}</p>
         <h3>{_escape(item.get("name", item_id or "未命名技能"))}</h3>
-      </div><span class="status status-{_escape(status)}">{_escape(PROFICIENCY_LABELS.get(status, status))}</span></div>
-      <div class="progress"><i style="width:{percent}%"></i></div>
-      <p class="muted">熟练度检查 {completed}/{total}</p>
+      </div><span class="status status-{_escape(status)}">{"有实测" if status == "measured" else "待记录"}</span></div>
       <div class="skill-performance"><div><span>{_escape(metric_label)}</span>
         <strong>{_escape(metric_value)}</strong></div><p>{_escape(evidence_basis)}</p></div>
-      <div class="chips">{check_html or '<span class="chip todo">○ 待设置检查项</span>'}</div>
-      <p>{_escape(_skill_next_step(item))}</p>
-      <p class="muted">标准：{_escape(_text(item.get("thresholds"), "尚未设置"))}</p>
+      <p>有效证据：{len(evidence)} 条</p>
+      <p class="muted">技能页只展示实测事实；勋章按模块练习的题量、正确率和实际用时判定。</p>
       {('<span class="season-tag">本赛季重点</span>' if current else "")}
     </article>"""
 
@@ -256,6 +208,17 @@ def _render_assessment(item: dict[str, Any]) -> str:
     <td>{_escape(source)}</td><td>{ranked}</td></tr>"""
 
 
+def _render_practice(item: dict[str, Any]) -> str:
+    purpose = "可判定勋章" if item.get("locked_before_start") else "仅记录"
+    return f"""
+    <tr><td>{_escape(item.get("date"))}</td><td>{_escape(item.get("module"))}</td>
+    <td>{_escape(item.get("correct_count"))}/{_escape(item.get("question_count"))}</td>
+    <td>{_escape(_format_percent(item.get("accuracy_rate")))}</td>
+    <td>{_escape(item.get("duration_seconds"))} 秒</td>
+    <td>{_escape(item.get("seconds_per_question"))} 秒</td>
+    <td>{_escape(purpose)}</td></tr>"""
+
+
 def _render_answer(item: dict[str, Any]) -> str:
     answer = _text(item.get("answer_text"), "未保存原文")
     if len(answer) > 240:
@@ -307,7 +270,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     catalog = [item for item in state.get("catalog", []) if isinstance(item, dict)]
     catalog.sort(
         key=lambda item: (
-            STATUS_ORDER.get(str(item.get("status")), 99),
+            0 if item.get("recent_performance") else 1,
             str(item.get("subject", "")),
             str(item.get("module", "")),
             str(item.get("name", "")),
@@ -332,6 +295,10 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     assessments = "".join(
         _render_assessment(item) for item in state.get("assessments", [])
     )
+    practice_records = [
+        item for item in state.get("practice_records", []) if isinstance(item, dict)
+    ]
+    practices = "".join(_render_practice(item) for item in practice_records)
     answers = "".join(
         _render_answer(item) for item in state.get("shenlun_portfolio", [])
     )
@@ -344,10 +311,8 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
 
     standard = [item for item in catalog if item.get("tier") == "standard"]
     total = len(standard)
-    counts = {
-        status: sum(item.get("status") == status for item in standard)
-        for status in PROFICIENCY_LABELS
-    }
+    measured_skills = sum(bool(item.get("recent_performance")) for item in standard)
+    measured_modules = len({item.get("module") for item in practice_records})
     unlocked_medals = sum(item.get("status") == "unlocked" for item in fixed_medals)
     all_unlocked_medals = sum(item.get("status") == "unlocked" for item in medal_items)
     open_easy_points = sum(
@@ -379,7 +344,7 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     .metric {{ min-width:0; padding:14px; text-align:left }} .metric:hover,.metric:focus-visible {{ border-color:var(--gold); transform:translateY(-1px) }} .metric strong {{ display:block; color:var(--gold); font-size:25px }} .metric span {{ color:var(--muted); font-size:12px }} .tabs,.filters {{ display:flex; gap:8px; flex-wrap:wrap; padding:10px; margin-bottom:16px }}
     button,input {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624; font:inherit }} button {{ cursor:pointer }} button.active {{ color:var(--gold); border-color:var(--gold) }} input {{ flex:1; min-width:210px }} .manual-refresh {{ margin-top:7px; color:var(--gold); border-color:#78622f }}
     .grid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:13px }} .card {{ padding:16px; position:relative; overflow:hidden }} .card-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start }} .status {{ padding:3px 8px; border-radius:99px; background:#1c2b3d; white-space:nowrap; font-size:12px }}
-    .status-mastered {{ color:var(--gold) }} .status-owned {{ color:var(--green) }} .status-discovered {{ color:var(--blue) }} .progress {{ height:7px; background:#26364a; border-radius:99px; overflow:hidden }} .progress i {{ display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--green)) }}
+    .status-measured {{ color:var(--green) }} .status-unmeasured {{ color:var(--muted) }}
     .skill-performance {{ display:flex; justify-content:space-between; gap:12px; align-items:end; margin:12px 0; padding:10px 12px; background:#0b1624; border-left:3px solid var(--gold); border-radius:3px 9px 9px 3px }} .skill-performance span {{ display:block; color:var(--muted); font-size:11px }} .skill-performance strong {{ color:var(--gold); font-size:22px; line-height:1.2 }} .skill-performance p {{ margin:0; color:var(--muted); font-size:12px; text-align:right }}
     .chips {{ display:flex; flex-wrap:wrap; gap:5px }} .chip {{ padding:3px 7px; border-radius:7px; font-size:12px }} .chip.done {{ color:#baf7cc; background:#143323 }} .chip.todo {{ color:#b5c0cd; background:#1a2736 }} .season-tag {{ position:absolute; right:0; bottom:0; padding:3px 9px; color:#08111d; background:var(--gold); font-size:11px; font-weight:700 }}
     details {{ padding:12px 16px; margin-bottom:16px }} summary {{ cursor:pointer; color:var(--gold); font-weight:700 }} .rank-overview {{ display:grid; grid-template-columns:1.2fr repeat(3,1fr); gap:14px; padding:18px }} .rank-now strong {{ display:block; color:var(--gold); font-size:28px }} .rank-stat span {{ display:block; color:var(--muted); font-size:12px }} .rank-stat strong {{ font-size:18px }}
@@ -391,16 +356,16 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     <div class="meta">数据更新：{_escape(updated_at)}<br>页面生成：{_escape(generated_at)}<br>每天 08:00 自动刷新<br><button id="manual-refresh" class="manual-refresh" type="button">手动刷新</button><br>数据文件：{_escape(source_path)}</div></header>
   <p class="summary-label">技能全貌</p><section class="summary">
     <button class="metric jump" data-tab="skills" data-filter="all"><strong>{total}</strong><span>技能总数</span></button>
-    <button class="metric jump" data-tab="skills" data-filter="mastered"><strong>{counts["mastered"]}</strong><span>稳定掌握</span></button>
-    <button class="metric jump" data-tab="skills" data-filter="owned"><strong>{counts["owned"]}</strong><span>考场可用</span></button>
-    <button class="metric jump" data-tab="skills" data-filter="discovered"><strong>{counts["discovered"]}</strong><span>练习中</span></button>
-    <button class="metric jump" data-tab="skills" data-filter="silhouette"><strong>{counts["silhouette"]}</strong><span>未开始</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="measured"><strong>{measured_skills}</strong><span>已有实测技能</span></button>
+    <button class="metric jump" data-tab="skills" data-filter="unmeasured"><strong>{total - measured_skills}</strong><span>暂无实测技能</span></button>
+    <button class="metric jump" data-tab="records"><strong>{len(practice_records)}</strong><span>练习战绩</span></button>
+    <button class="metric jump" data-tab="records"><strong>{measured_modules}/5</strong><span>有量化记录模块</span></button>
   </section>
   <p class="summary-label">学习记录</p><section class="summary">
     <button class="metric jump" data-tab="wrongs"><strong>{len(state.get("wrong_answers", []))}</strong><span>错题</span></button>
     <button class="metric jump" data-tab="easy-points"><strong>{open_easy_points}</strong><span>未解决易错点</span></button>
     <button class="metric jump" data-tab="records"><strong>{len(state.get("assessments", []))}</strong><span>有效战绩</span></button>
-    <button class="metric jump" data-tab="medals"><strong>{unlocked_medals}/27</strong><span>已点亮勋章</span></button>
+    <button class="metric jump" data-tab="medals"><strong>{unlocked_medals}/{len(fixed_medals)}</strong><span>已点亮勋章</span></button>
     <button class="metric jump" data-tab="records"><strong>{_escape(rank)} {"★" * stars}</strong><span>本赛季段位 · 调整点 {adjustment}/{adjustment_cap}</span></button>
   </section>
   <nav class="tabs">
@@ -408,15 +373,15 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     <button class="tab-btn" data-tab="easy-points">易错点</button><button class="tab-btn" data-tab="records">战绩</button>
     <button class="tab-btn" data-tab="answers">申论答题册</button><button class="tab-btn" data-tab="medals">勋章墙</button>
   </nav>
-  <section class="page" data-page="skills"><details><summary>熟练度鉴定规则</summary><p>未开始：没有有效证据。练习中：做过练习，但还没通过考场条件。考场可用：通过限时、新材料或混合题验证。稳定掌握：考场可用后，7 至 15 天延迟复测仍达标，并且没有对应的高风险未解决易错点。没有预先锁定门槛的技能最高只能进入练习中。</p></details><div class="filters">
-    <button class="filter-btn active" data-filter="all">全部 {total}</button><button class="filter-btn" data-filter="mastered">稳定掌握 {counts["mastered"]}</button>
-    <button class="filter-btn" data-filter="owned">考场可用 {counts["owned"]}</button><button class="filter-btn" data-filter="discovered">练习中 {counts["discovered"]}</button>
-    <button class="filter-btn" data-filter="silhouette">未开始 {counts["silhouette"]}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
+  <section class="page" data-page="skills"><details><summary>数据口径</summary><p>技能页只展示真实练习数据，不再使用“考场可用”等主观标签。模块量化勋章要求单次锁定练习至少 10 题，同时达到规定正确率和平均每题用时；缺少实际用时不判定。</p></details><div class="filters">
+    <button class="filter-btn active" data-filter="all">全部 {total}</button>
+    <button class="filter-btn" data-filter="measured">有实测 {measured_skills}</button>
+    <button class="filter-btn" data-filter="unmeasured">待记录 {total - measured_skills}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
     <input id="skill-search" type="search" placeholder="搜索科目、模块或技能"></div>
     <div class="grid" id="skill-grid">{skills or _empty("技能目录尚未建立。完成季前校准后再生成总览。")}</div></section>
   <section class="page" data-page="wrongs" hidden><h2>错题本</h2><div class="grid">{wrongs or _empty("暂无错题记录。")}</div></section>
   <section class="page" data-page="easy-points" hidden><h2>易错点</h2><div class="grid">{easy_points or _empty("暂无易错点。")}</div></section>
-  <section class="page" data-page="records" hidden><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
+  <section class="page" data-page="records" hidden><h2>练习战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>模块</th><th>正确题数</th><th>正确率</th><th>总用时</th><th>平均每题</th><th>用途</th></tr></thead><tbody>{practices or '<tr><td colspan="7">暂无同时包含题量、正确数和实际用时的练习战绩。</td></tr>'}</tbody></table></div><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
     <h2>战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>科目</th><th>范围</th><th>成绩</th><th>来源</th><th>用途</th></tr></thead><tbody>{assessments or '<tr><td colspan="6">暂无战绩。</td></tr>'}</tbody></table></div></section>
   <section class="page" data-page="answers" hidden><h2>申论答题册</h2><div class="grid">{answers or _empty("暂无申论作答。")}</div></section>
   <section class="page" data-page="medals" hidden><h2>勋章墙</h2><div class="filters"><button class="medal-filter active" data-medal-filter="all">全部 {len(medal_items)}</button><button class="medal-filter" data-medal-filter="locked">未点亮 {len(medal_items) - all_unlocked_medals}</button><button class="medal-filter" data-medal-filter="unlocked">已点亮 {all_unlocked_medals}</button></div><div class="grid">{medals}</div></section>
