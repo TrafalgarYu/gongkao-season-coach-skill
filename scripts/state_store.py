@@ -1,5 +1,11 @@
 """
 版本记录：
+- v1.7.2 / 2026-08-31
+  - 赛季改为由用户自行设置起止日期，不再限制为 14 个自然日。
+  - 赛季到期可结算为等待状态，归档旧段位与赛季成就快照并清空当前进度。
+- v1.7.1 / 2026-08-31
+  - 新赛季固定为 14 个自然日，拒绝其他起止日期长度。
+  - 每季继续使用 season_only 模式重新定级。
 - v1.7.0 / 2026-08-31
   - 正确率与速度允许分开入账，练习记录可缺少用时但必须保留真实题量和正确数。
   - 练习记录增加 11 项能力归类、记录类型和是否进入长期能力统计。
@@ -442,9 +448,13 @@ def _extract_legacy_practice_records(
                 text = " ".join(text_sources)
                 match = re.search(r"(?P<minutes>\d+)\s*分(?P<seconds>\d+)\s*秒", text)
                 if not match:
-                    match = re.search(r"(?<!\d)(?P<minutes>\d{1,3}):(?P<seconds>\d{2})(?!\d)", text)
+                    match = re.search(
+                        r"(?<!\d)(?P<minutes>\d{1,3}):(?P<seconds>\d{2})(?!\d)", text
+                    )
                 if match:
-                    duration_seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+                    duration_seconds = int(match.group("minutes")) * 60 + int(
+                        match.group("seconds")
+                    )
                     report["duration_recovered_from_text"] += 1
             if question_count is None:
                 report["skipped_missing_question_count"] += 1
@@ -490,7 +500,9 @@ def _extract_legacy_practice_records(
                 if duration_seconds is not None
                 else None
             )
-            is_retest = "retest" in str(task_id).lower() or "复测" in " ".join(text_sources)
+            is_retest = "retest" in str(task_id).lower() or "复测" in " ".join(
+                text_sources
+            )
             record = {
                 "practice_id": _stable_legacy_id(
                     "practice",
@@ -812,8 +824,7 @@ def migrate_state(
             continue
         if not record.get("ability_id"):
             hint = " ".join(
-                str(record.get(key) or "")
-                for key in ("source", "submission_ref")
+                str(record.get(key) or "") for key in ("source", "submission_ref")
             )
             record["ability_id"] = infer_ability_id(record.get("module"), hint)
 
@@ -1063,6 +1074,115 @@ def _sync_shenlun_portfolio(
     return repaired, sorted(set(unresolved))
 
 
+def _archive_current_season(
+    state: dict[str, Any], timestamp: str | None = None
+) -> None:
+    season = state["season"]
+    season_id = season.get("season_id")
+    if not season_id:
+        raise StateError("当前没有可归档的正式赛季。")
+    if any(item.get("season_id") == season_id for item in state["season_history"]):
+        raise StateError(f"赛季已经归档：{season_id}")
+    state["season_history"].append(
+        {
+            "season_id": season_id,
+            "campaign_id": season.get("campaign_id"),
+            "number": season.get("number"),
+            "ruleset_version": season.get("ruleset_version"),
+            "start_date": season.get("start_date"),
+            "end_date": season.get("end_date"),
+            "rank": season.get("rank"),
+            "stars": season.get("stars"),
+            "trophy": {
+                "module_rankings": copy.deepcopy(state["module_rankings"]),
+                "subject_rankings": copy.deepcopy(state["subject_rankings"]),
+                "season_medals": [
+                    copy.deepcopy(item)
+                    for item in state["medals"]
+                    if item.get("category") == "赛季成就"
+                ],
+            },
+            "settled_at": timestamp or now_iso(),
+        }
+    )
+
+
+def _reset_current_season_progress(state: dict[str, Any]) -> None:
+    state["module_rankings"] = []
+    state["subject_rankings"] = []
+    state["daily_quest"] = copy.deepcopy(default_state()["daily_quest"])
+    for medal in state["medals"]:
+        if medal.get("category") != "赛季成就":
+            continue
+        medal.update(
+            {
+                "status": "locked",
+                "progress_current": 0,
+                "evidence_refs": [],
+                "unlocked_at": None,
+                "times_earned": 0,
+            }
+        )
+
+
+def settle_current_season(
+    state: Mapping[str, Any], *, timestamp: str | None = None
+) -> dict[str, Any]:
+    """结算到期赛季并进入等待用户设置下一赛季的状态。"""
+    next_state = copy.deepcopy(dict(state))
+    validate_state(next_state)
+    season = next_state["season"]
+    if season.get("status") != "active":
+        raise StateError("只有进行中的正式赛季可以结算。")
+    end_date = season.get("end_date")
+    try:
+        season_end = datetime.strptime(str(end_date), "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise StateError("当前赛季 end_date 必须使用 YYYY-MM-DD。") from exc
+    settled_at = timestamp or now_iso()
+    try:
+        settled_date = datetime.fromisoformat(settled_at.replace("Z", "+00:00")).date()
+    except ValueError as exc:
+        raise StateError("结算时间必须使用 ISO 8601。") from exc
+    if settled_date < season_end:
+        raise StateError("尚未到用户设置的赛季结束日期。")
+
+    previous_rank = (
+        season.get("rank", "未定级")
+        if season.get("status") == "active"
+        else season.get("previous_rank", "未定级")
+    )
+    previous_stars = (
+        season.get("stars", 0)
+        if season.get("status") == "active"
+        else season.get("previous_stars", 0)
+    )
+    _archive_current_season(next_state, settled_at)
+    _reset_current_season_progress(next_state)
+    season.update(
+        {
+            "season_id": None,
+            "status": "settled",
+            "phase": "awaiting_next_season",
+            "rank": "未定级",
+            "stars": 0,
+            "previous_rank": previous_rank,
+            "previous_stars": previous_stars,
+            "season_effective_days": 0,
+            "season_completed_tasks": 0,
+            "challenge_progress": {},
+            "placement_progress": {
+                "xingce_current": 0,
+                "xingce_target": 2,
+                "shenlun_current": 0,
+                "shenlun_target": 2,
+            },
+        }
+    )
+    validate_state(next_state)
+    return next_state
+
+
 def start_new_season(
     state: Mapping[str, Any],
     *,
@@ -1071,36 +1191,35 @@ def start_new_season(
     theme: str | None = None,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """归档当前赛季并建立一个从未定级开始的新赛季。"""
+    """按用户设置的起止日期归档旧赛季并开始新赛季。"""
     next_state = copy.deepcopy(dict(state))
     validate_state(next_state)
+    try:
+        season_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise StateError("新赛季 start_date 必须使用 YYYY-MM-DD。") from exc
+    try:
+        season_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise StateError("新赛季 end_date 必须使用 YYYY-MM-DD。") from exc
+    length_days = (season_end - season_start).days + 1
+    if length_days <= 0:
+        raise StateError("新赛季 end_date 不得早于 start_date。")
+
     season = next_state["season"]
     old_season_id = season.get("season_id")
     if old_season_id and season.get("status") != "preseason":
-        if any(
-            item.get("season_id") == old_season_id
-            for item in next_state["season_history"]
-        ):
-            raise StateError(f"赛季已经归档：{old_season_id}")
-        next_state["season_history"].append(
-            {
-                "season_id": old_season_id,
-                "campaign_id": season.get("campaign_id"),
-                "number": season.get("number"),
-                "ruleset_version": season.get("ruleset_version"),
-                "start_date": season.get("start_date"),
-                "end_date": season.get("end_date"),
-                "rank": season.get("rank"),
-                "stars": season.get("stars"),
-                "trophy": {
-                    "module_rankings": copy.deepcopy(next_state["module_rankings"]),
-                    "subject_rankings": copy.deepcopy(next_state["subject_rankings"]),
-                },
-                "settled_at": timestamp or now_iso(),
-            }
-        )
-    previous_rank = season.get("rank", "未定级")
-    previous_stars = season.get("stars", 0)
+        _archive_current_season(next_state, timestamp)
+    previous_rank = (
+        season.get("rank", "未定级")
+        if season.get("status") == "active"
+        else season.get("previous_rank", "未定级")
+    )
+    previous_stars = (
+        season.get("stars", 0)
+        if season.get("status") == "active"
+        else season.get("previous_stars", 0)
+    )
     current_number = int(season.get("number") or 1)
     number = (
         current_number if season.get("status") == "preseason" else current_number + 1
@@ -1117,6 +1236,7 @@ def start_new_season(
             "ruleset_version": RULESET_VERSION,
             "start_date": start_date,
             "end_date": end_date,
+            "length_days": length_days,
             "theme": theme,
             "rank": "未定级",
             "stars": 0,
@@ -1139,32 +1259,7 @@ def start_new_season(
             "revenge_quest": None,
         }
     )
-    next_state["module_rankings"] = []
-    next_state["subject_rankings"] = []
-    next_state["daily_quest"] = copy.deepcopy(default_state()["daily_quest"])
-    for medal in next_state["medals"]:
-        if medal.get("category") != "赛季成就":
-            continue
-        medal.update(
-            {
-                "status": "locked",
-                "progress_current": 0,
-                "evidence_refs": [],
-                "unlocked_at": None,
-                "times_earned": 0,
-            }
-        )
-    try:
-        season_start = datetime.fromisoformat(start_date).date()
-    except ValueError as exc:
-        raise StateError("新赛季 start_date 必须使用 YYYY-MM-DD。") from exc
-    try:
-        season_end = datetime.fromisoformat(end_date).date()
-    except ValueError as exc:
-        raise StateError("新赛季 end_date 必须使用 YYYY-MM-DD。") from exc
-    if season_end < season_start:
-        raise StateError("新赛季 end_date 不能早于 start_date。")
-    season["length_days"] = (season_end - season_start).days + 1
+    _reset_current_season_progress(next_state)
     for skill in next_state["catalog"]:
         last_tested_at = skill.get("last_tested_at")
         needs_retest = skill.get("status") in {"owned", "mastered"}
@@ -2028,7 +2123,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
         seconds_per_question = record.get("seconds_per_question")
         accuracy_rate = record.get("accuracy_rate")
         if (duration is None) != (seconds_per_question is None):
-            raise StateError(f"practice_records[{index}] 总用时与平均用时必须同时存在或同时为空。")
+            raise StateError(
+                f"practice_records[{index}] 总用时与平均用时必须同时存在或同时为空。"
+            )
         if duration is not None and any(
             isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
             for value in (duration, seconds_per_question)
@@ -2043,17 +2140,29 @@ def validate_state(state: Mapping[str, Any]) -> None:
         expected_accuracy = round(correct_count / question_count * 100, 2)
         if abs(accuracy_rate - expected_accuracy) > 0.01:
             raise StateError(f"practice_records[{index}] 正确率与题量不一致。")
-        if duration is not None and abs(seconds_per_question - round(duration / question_count, 2)) > 0.01:
+        if (
+            duration is not None
+            and abs(seconds_per_question - round(duration / question_count, 2)) > 0.01
+        ):
             raise StateError(f"practice_records[{index}] 平均用时与总用时不一致。")
-        if infer_ability_id(record.get("module"), None) is None and not record.get("ability_id"):
+        if infer_ability_id(record.get("module"), None) is None and not record.get(
+            "ability_id"
+        ):
             raise StateError(f"practice_records[{index}].ability_id 缺失。")
         valid_abilities = {item[0] for item in ABILITY_SPECS if item[0] != "shenlun"}
         if record.get("ability_id") not in valid_abilities:
             raise StateError(f"practice_records[{index}].ability_id 无效。")
-        if record.get("record_type") not in {"task_practice", "free_practice", "full_mock", "retest"}:
+        if record.get("record_type") not in {
+            "task_practice",
+            "free_practice",
+            "full_mock",
+            "retest",
+        }:
             raise StateError(f"practice_records[{index}].record_type 无效。")
         if not isinstance(record.get("counts_for_ability"), bool):
-            raise StateError(f"practice_records[{index}].counts_for_ability 必须是布尔值。")
+            raise StateError(
+                f"practice_records[{index}].counts_for_ability 必须是布尔值。"
+            )
         if not isinstance(record.get("locked_before_start"), bool):
             raise StateError(
                 f"practice_records[{index}].locked_before_start 必须是布尔值。"
@@ -2079,7 +2188,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
         error_hunt_id = wrong.get("error_hunt_id")
         if error_hunt_id is not None and error_hunt_id not in error_hunt_ids:
             raise StateError(
-                f"wrong_answers[{index}].error_hunt_id 引用了不存在的易错点。"
+                f"wrong_answers[{index}].error_hunt_id 引用了不存在的错题类型。"
             )
     for index, error_hunt in enumerate(state["error_hunts"]):
         if error_hunt.get("status") not in {
@@ -2175,7 +2284,11 @@ def validate_state(state: Mapping[str, Any]) -> None:
                 raise StateError(f"medals[{index}].{field} 必须是非负整数。")
         if not isinstance(medal.get("repeatable"), bool):
             raise StateError(f"medals[{index}].repeatable 必须是布尔值。")
-        if isinstance(medal.get("times_earned"), bool) or not isinstance(medal.get("times_earned"), int) or medal.get("times_earned") < 0:
+        if (
+            isinstance(medal.get("times_earned"), bool)
+            or not isinstance(medal.get("times_earned"), int)
+            or medal.get("times_earned") < 0
+        ):
             raise StateError(f"medals[{index}].times_earned 必须是非负整数。")
 
     portfolio_id_set = set(portfolio_ids)
@@ -2537,6 +2650,24 @@ def start_new_season_file(
     )
 
 
+def settle_current_season_file(
+    state_path: Path,
+    *,
+    event_id: str,
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """原子结算到期赛季并等待用户设置下一赛季。"""
+    current = read_current_state(state_path)
+    candidate = settle_current_season(current, timestamp=timestamp)
+    return commit_candidate(
+        state_path,
+        candidate,
+        expected_revision=current["engine"]["state_revision"],
+        event_id=event_id,
+        timestamp=timestamp,
+    )
+
+
 def recover_from_backup(
     state_path: Path,
     *,
@@ -2605,7 +2736,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="只校验并输出迁移报告，不写入状态",
     )
 
-    season_parser = subparsers.add_parser("new-season", help="归档当前赛季并重新定级")
+    settle_parser = subparsers.add_parser(
+        "settle-season", help="结算到期赛季并等待用户设置下一赛季"
+    )
+    settle_parser.add_argument("--event-id", required=True)
+
+    season_parser = subparsers.add_parser("new-season", help="按用户日期开启新赛季")
     season_parser.add_argument("--start-date", required=True)
     season_parser.add_argument("--end-date", required=True)
     season_parser.add_argument("--theme")
@@ -2637,6 +2773,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(_summary(state_path, state, "valid"))
         elif args.command == "migrate":
             _print_json(migrate_file(state_path, dry_run=args.dry_run))
+        elif args.command == "settle-season":
+            _print_json(
+                settle_current_season_file(
+                    state_path,
+                    event_id=args.event_id,
+                )
+            )
         elif args.command == "new-season":
             _print_json(
                 start_new_season_file(

@@ -1,5 +1,9 @@
 """
 版本记录：
+- v5.1.1 / 2026-08-31
+  - 验证刷新按钮位于页头右侧独立区域，并展示历届赛季段位与成就。
+- v5.1.0 / 2026-08-31
+  - 验证删除重复能力页、申论练习入账、错题类型纵向统计和导航纯数量标签。
 - v5.0.0 / 2026-08-31
   - 验证五类成就、11项实力双战线、练习排序和固定错题分类。
 - v4.0.0 / 2026-08-31
@@ -110,6 +114,78 @@ class DashboardTests(unittest.TestCase):
                 "ruleset_version": "1.7.0",
                 "record_type": "task_practice",
                 "counts_for_ability": True,
+                "ability_id": "data",
+            }
+        )
+        state["shenlun_portfolio"].append(
+            {
+                "portfolio_id": "portfolio-practice-1",
+                "campaign_id": None,
+                "season_id": None,
+                "date": "2026-08-30",
+                "task_type": "归纳概括",
+                "prompt_ref": "乡村治理练习",
+                "submission_ref": "submission-shenlun-1",
+                "score": 16,
+                "score_max": 20,
+                "score_rate": 80,
+                "normalization_status": "exact",
+                "score_source": "teacher",
+                "dimensions": {},
+                "answer_text": "测试作答",
+                "feedback": None,
+                "word_count": 180,
+                "time_minutes": 22,
+            }
+        )
+        state["error_hunts"].append(
+            {
+                "error_hunt_id": "error-mixed-growth",
+                "campaign_id": None,
+                "season_id": None,
+                "subject": "行测",
+                "module": "资料分析",
+                "mechanism": "混合增长率",
+                "status": "identified",
+                "evidence": ["wrong-1", "wrong-2"],
+                "next_review_at": "2026-09-02",
+            }
+        )
+        for index in range(1, 3):
+            state["wrong_answers"].append(
+                {
+                    "wrong_id": f"wrong-{index}",
+                    "campaign_id": None,
+                    "season_id": None,
+                    "date": f"2026-08-{28 + index}",
+                    "subject": "行测",
+                    "module": "资料分析",
+                    "question_ref": f"混合增长率第{index}题",
+                    "user_answer": "A",
+                    "correct_answer": "B",
+                    "error_hunt_id": "error-mixed-growth",
+                    "correction": "先判断总体介于两部分之间",
+                    "status": "corrected",
+                    "next_review_at": "2026-09-02",
+                }
+            )
+
+        archived_medal = next(
+            item for item in state["medals"] if item["medal_id"] == "season-mocks"
+        ).copy()
+        archived_medal.update({"status": "unlocked", "progress_current": 4})
+        state["season_history"].append(
+            {
+                "season_id": "campaign-1:season-1",
+                "campaign_id": "campaign-1",
+                "number": 1,
+                "ruleset_version": "1.7.0",
+                "start_date": "2026-01-01",
+                "end_date": "2026-03-31",
+                "rank": "黄金",
+                "stars": 2,
+                "trophy": {"season_medals": [archived_medal]},
+                "settled_at": "2026-03-31T20:00:00+08:00",
             }
         )
 
@@ -120,11 +196,9 @@ class DashboardTests(unittest.TestCase):
 
         for section in (
             "今日任务",
-            "能力分析",
             "技能地图",
             "练习记录",
             "错题本",
-            "易错点",
             "申论答题本",
             "战绩段位",
             "成就墙",
@@ -155,6 +229,26 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("历史最高", report)
         self.assertIn("行测 0/2", report)
         self.assertIn("钻石 ★★☆", report)
+        self.assertNotIn('data-page="ability"', report)
+        self.assertNotIn("计划出勤", report)
+        self.assertIn('<span class="tab-label">今日任务</span><b>0</b>', report)
+        self.assertIn('<span class="tab-label">练习记录</span><b>2</b>', report)
+        self.assertIn('data-subject="申论"', report)
+        self.assertIn("乡村治理练习", report)
+        self.assertIn("教师评分", report)
+        self.assertIn("混合增长率", report)
+        self.assertIn("错了 2 次", report)
+        self.assertIn('class="wrong-entry"', report)
+        self.assertNotIn("错题保存题，易错点保存机制", report)
+        self.assertIn('class="header-tools"', report)
+        self.assertGreater(
+            report.index('id="manual-refresh"'), report.index('class="meta"')
+        )
+        self.assertNotIn("<br><button id=\"manual-refresh\"", report)
+        self.assertIn("历届赛季档案", report)
+        self.assertIn("2026-01-01 至 2026-03-31", report)
+        self.assertIn("黄金 ★★", report)
+        self.assertIn("赛季模考", report)
 
     def test_dashboard_distinguishes_exam_baseline_and_single_question(self) -> None:
         state = state_store.default_state("2026-08-30T00:00:00+00:00")

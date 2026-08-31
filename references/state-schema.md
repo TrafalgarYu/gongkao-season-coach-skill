@@ -21,7 +21,7 @@
 - 把状态文件视为学习事实，把 `SKILL.md` 与 references 视为固定算法。
 - 不把用户技能、错题、战绩、作答或勋章写回规则文件。
 
-界面对用户使用“技能、技能总览、练习战绩、错题本、易错点、战绩、申论答题册、勋章墙、调整点”。为兼容既有状态，JSON 继续保留 `catalog` 和 `forms`；`practice_records`、`error_hunts`、`shenlun_portfolio`、`command_points` 和 `reward_bundles` 也属于内部字段，不直接显示字段名。
+界面对用户使用“技能、技能总览、练习战绩、错题本、错题类型、战绩、申论答题册、勋章墙、调整点”。为兼容既有状态，JSON 继续保留 `catalog` 和 `forms`；`practice_records`、`error_hunts`、`shenlun_portfolio`、`command_points` 和 `reward_bundles` 也属于内部字段，不直接显示字段名。`error_hunts` 在界面统一显示为错题类型，不再建立独立的“易错点”分类。
 - 不用对话中的旧副本覆盖磁盘中的较新状态。
 - 每次读取后校验 `schema_version`、`engine.state_revision` 和关键不变量。
 - 每次成功变更令 `state_revision` 加 1，并更新 `updated_at`。
@@ -205,7 +205,7 @@
 - `economy.transactions[]`：`transaction_id`、`campaign_id`、`season_id`、`event_id`、`date`、`type`、`delta`、`balance_after`、`reason`。
 - `task_history[]`：`task_id`、`campaign_id`、`season_id`、`date`、`status`、`locked_conditions`、`submission_refs`、`verification`、`reward_id`。
 - `weekly_settlements[]`：`week_key`、`campaign_id`、`season_id`、`revision`、`period_start`、`period_end`、`metrics`、`reward_ids`、`created_at`。
-- `season_history[]`：`season_id`、`campaign_id`、`number`、`ruleset_version`、`start_date`、`end_date`、`rank`、`stars`、`trophy`、`settled_at`。
+- `season_history[]`：`season_id`、`campaign_id`、`number`、`ruleset_version`、`start_date`、`end_date`、`rank`、`stars`、`trophy`、`settled_at`；其中 `trophy.season_medals` 保存结算时全部赛季成就快照，供历届档案查看。
 - `campaign_history[]`：`campaign_id`、考试口径、目标契约摘要、起止日期、最终成绩、关联 `season_id` 列表、`completed_at`。
 - `goal_contract_history[]`：`contract_id`、`campaign_id`、完整目标、依据、确认与失效时间。
 - `rule_change_proposals[]`：`proposal_id`、`campaign_id`、`season_id`、`proposed_at`、`reason`、`expected_benefit`、`side_effects`、`decision`、`decided_at`。
@@ -232,7 +232,7 @@
 - `recovery` 是一种出勤状态，必须同时写 `counts_as_effective = true`；`missed` 与 `planned_rest` 必须为 false。
 - 每个 `reward_id` 唯一；同一 `task_id` 最多产生一个最终结算单。
 - `command_points` 始终位于 0 与 `command_points_cap` 之间；每次变化都有 transaction。
-- 技能、错题、易错点、任务、奖励和结算之间引用的 ID 必须存在。
+- 技能、错题、错题类型、任务、奖励和结算之间引用的 ID 必须存在。
 - 技能近期实测的 `sample_count`、`question_count` 为非负整数或 `null`；缺少实测时不得用旧检查项完成比例代替正确率或得分率。
 - 每条练习战绩的正确率和平均每题用时必须与题量、正确数和实际总用时一致；同一任务、提交引用和模块最多一条。
 - `medals` 必须恰好包含当前五类 234 项成就，不保留已被新目录替换的重复旧勋章。
@@ -242,6 +242,8 @@
 - 1.7 新任务可用 `medal_targets` 标注可能推进的成就；无法可靠预判时可以为空，可重复成就点亮后仍可继续作为目标。
 - 已验证申论任务的每个 `submission_ref` 必须存在唯一 `portfolio:<submission_ref>`，验证结果同时保存 `portfolio_changes`。
 - `weekly_settlements` 的 `week_key` 唯一；`season_history` 的 `season_id` 唯一；`campaign_history` 的 `campaign_id` 唯一。
+- 正式赛季的 `start_date` 与 `end_date` 由用户明确设置，必须使用 `YYYY-MM-DD`，且结束日期不得早于开始日期；`length_days` 按首尾日期都计入的自然日计算，不使用固定赛季长度。
+- 到达 `end_date` 后用 `settle-season` 结算：当前 `season.status = settled`、`phase = awaiting_next_season`、`season_id = null`，段位和赛季成就归零；历史快照写入 `season_history`。只有用户再次设置起止日期后才能运行 `new-season`。
 - `readiness_percent` 为空或位于 0–100；数据不足时必须为空并标记 `calibrating`。
 - 时间戳使用带时区的 ISO 8601；自然日使用 `YYYY-MM-DD`。
 
@@ -285,7 +287,7 @@
 加载 `0.1`、`0.1.1`、`1.0`、`1.1`、`1.2`、`1.3`、`1.4`、`1.5` 或 `1.6` 状态时，先运行 `scripts/state_store.py migrate --dry-run`，核对报告后运行 `migrate` 迁移到 `1.7`：
 
 1. 先保存未经修改的备份。
-2. 保留全部技能证据、错题、易错点、战绩、申论作答、出勤、奖励事实、历史和时间戳。
+2. 保留全部技能证据、错题与类型统计、战绩、申论作答、出勤、奖励事实、历史和时间戳。
 3. 添加缺失的 `engine`、`campaign_history`、`goal_contract_history`、`weekly_settlements`、`rule_change_proposals`、economy transactions 与新增 profile 字段。
 4. 把旧 `season.phase = preseason` 映射为 `status = preseason`、`phase = calibration`；正式赛季按日期和历史映射为 `active` 或 `settled`。
 5. 为已有备考周期生成稳定 `campaign_id`，为赛季、目标契约和历史对象补稳定 ID；只补引用，不拆分或合并历史事实。
@@ -314,6 +316,6 @@
 
 ## 9. 历史保留与压缩
 
-永久保留 campaign 与 season 历史、目标契约、技能证据、练习战绩、错题本、易错点、排位战绩、申论答题册、勋章、生涯最佳和调整点流水。日常原始提交可在跨两个赛季后压缩为摘要，但摘要必须保留 campaign ID、season ID、task ID、日期、证据引用、判定、奖励 ID 和来源。
+永久保留 campaign 与 season 历史、目标契约、技能证据、练习战绩、错题本与类型统计、排位战绩、申论答题册、勋章、生涯最佳和调整点流水。日常原始提交可在跨两个赛季后压缩为摘要，但摘要必须保留 campaign ID、season ID、task ID、日期、证据引用、判定、奖励 ID 和来源。
 
 状态过大时优先把不可变旧历史归档到同目录、带校验信息的年度文件，并在主状态保留索引。不得为了缩小文件删除尚未到期复测、未揭晓奖励或当前稳定度窗口需要的数据。

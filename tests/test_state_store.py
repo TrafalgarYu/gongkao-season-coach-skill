@@ -1,5 +1,9 @@
 """
 版本记录：
+- v1.7.2 / 2026-08-31
+  - 验证用户可自定赛季起止日期，旧赛季成就归档且新赛季重新归零。
+- v1.7.1 / 2026-08-31
+  - 验证新赛季固定为 14 个自然日并在每季重新定级。
 - v1.7.0 / 2026-08-31
   - 覆盖五类成就、分离正确率与用时、11项能力归类和1.6历史迁移。
 - v1.6.0 / 2026-08-31
@@ -640,13 +644,21 @@ class StateStoreTests(unittest.TestCase):
         four_sims = next(
             item for item in state["medals"] if item["medal_id"] == "season-mocks"
         )
-        four_sims["progress_current"] = 3
+        four_sims.update(
+            {
+                "status": "unlocked",
+                "progress_current": 4,
+                "times_earned": 1,
+                "unlocked_at": TIMESTAMP,
+                "evidence_refs": ["assessment-old-1"],
+            }
+        )
 
         next_state = state_store.start_new_season(
             state,
-            start_date="2026-09-01",
-            end_date="2026-09-28",
-            theme="限时稳定",
+            start_date="2026-11-01",
+            end_date="2027-03-31",
+            theme="公考备考季",
             timestamp=TIMESTAMP,
         )
 
@@ -660,8 +672,15 @@ class StateStoreTests(unittest.TestCase):
                 item
                 for item in next_state["medals"]
                 if item["medal_id"] == "season-mocks"
-            )["progress_current"],
-            0,
+            )["status"],
+            "locked",
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "locked" and item["progress_current"] == 0
+                for item in next_state["medals"]
+                if item["category"] == "赛季成就"
+            )
         )
         self.assertEqual(
             next(
@@ -672,8 +691,27 @@ class StateStoreTests(unittest.TestCase):
             1,
         )
         self.assertEqual(len(next_state["season_history"]), 1)
+        archived_medals = next_state["season_history"][0]["trophy"][
+            "season_medals"
+        ]
+        archived_mock_medal = next(
+            item for item in archived_medals if item["medal_id"] == "season-mocks"
+        )
+        self.assertEqual(archived_mock_medal["status"], "unlocked")
+        self.assertEqual(archived_mock_medal["progress_current"], 4)
         self.assertEqual(next_state["module_rankings"], [])
         self.assertEqual(next_state["subject_rankings"], [])
+        self.assertEqual(next_state["season"]["length_days"], 151)
+        self.assertEqual(next_state["season"]["ranking_mode"], "season_only")
+
+        with self.assertRaisesRegex(state_store.StateError, "不得早于"):
+            state_store.start_new_season(
+                state,
+                start_date="2027-03-31",
+                end_date="2026-11-01",
+                theme="限时稳定",
+                timestamp=TIMESTAMP,
+            )
 
     def test_new_task_medal_targets_are_optional_but_must_be_known(self) -> None:
         state = state_store.default_state(TIMESTAMP)
@@ -689,6 +727,82 @@ class StateStoreTests(unittest.TestCase):
         state["daily_quest"]["options"][0]["medal_targets"] = ["unknown-medal"]
         with self.assertRaisesRegex(state_store.StateError, "medal_targets 无效"):
             state_store.validate_state(state)
+
+    def test_settled_season_waits_for_user_dates_and_keeps_archive(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        state["campaign"]["campaign_id"] = "campaign-1"
+        state["season"].update(
+            {
+                "season_id": "campaign-1:season-1",
+                "campaign_id": "campaign-1",
+                "status": "active",
+                "start_date": "2026-01-01",
+                "end_date": "2026-03-31",
+                "rank": "黄金",
+                "stars": 2,
+            }
+        )
+        season_medal = next(
+            item for item in state["medals"] if item["medal_id"] == "season-rank"
+        )
+        season_medal.update(
+            {
+                "status": "unlocked",
+                "progress_current": 1,
+                "times_earned": 1,
+                "unlocked_at": TIMESTAMP,
+                "evidence_refs": ["fact:season_ranked:1"],
+            }
+        )
+
+        settled = state_store.settle_current_season(
+            state, timestamp="2026-03-31T20:00:00+08:00"
+        )
+
+        self.assertEqual(settled["season"]["status"], "settled")
+        self.assertEqual(settled["season"]["phase"], "awaiting_next_season")
+        self.assertIsNone(settled["season"]["season_id"])
+        self.assertEqual(settled["season"]["rank"], "未定级")
+        self.assertEqual(settled["season"]["stars"], 0)
+        self.assertEqual(len(settled["season_history"]), 1)
+        self.assertEqual(settled["season_history"][0]["rank"], "黄金")
+        archived_medals = settled["season_history"][0]["trophy"]["season_medals"]
+        self.assertEqual(
+            next(
+                item for item in archived_medals if item["medal_id"] == "season-rank"
+            )["status"],
+            "unlocked",
+        )
+        self.assertTrue(
+            all(
+                item["status"] == "locked" and item["progress_current"] == 0
+                for item in settled["medals"]
+                if item["category"] == "赛季成就"
+            )
+        )
+        state_store.refresh_medals(settled, "2026-04-01T08:00:00+08:00")
+        self.assertTrue(
+            all(
+                item["status"] == "locked" and item["progress_current"] == 0
+                for item in settled["medals"]
+                if item["category"] == "赛季成就"
+            )
+        )
+
+        next_state = state_store.start_new_season(
+            settled,
+            start_date="2026-11-01",
+            end_date="2027-03-31",
+            timestamp="2026-11-01T08:00:00+08:00",
+        )
+        self.assertEqual(len(next_state["season_history"]), 1)
+        self.assertEqual(next_state["season"]["number"], 2)
+        self.assertEqual(next_state["season"]["previous_rank"], "黄金")
+
+        with self.assertRaisesRegex(state_store.StateError, "尚未到"):
+            state_store.settle_current_season(
+                state, timestamp="2026-03-30T20:00:00+08:00"
+            )
 
     def test_v13_migration_replaces_legacy_medal_and_keeps_open_task(self) -> None:
         old = state_store.default_state(TIMESTAMP)

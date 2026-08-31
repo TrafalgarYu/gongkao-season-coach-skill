@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.7.1 / 2026-08-31
+  - 赛季成长成就只使用当前赛季练习计算，避免新赛季被历史数据重新点亮。
 - v1.7.0 / 2026-08-31
   - 建立单次战绩、实力勋章、成长成就、生涯成就和赛季成就五类目录。
   - 行测练习按 10 个能力项归类，申论单列为第 11 项；正确率或得分率与速度分开结算。
@@ -537,11 +539,12 @@ def _growth_results(
 def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
     """按事实刷新五类成就；永久档位不回退，重复成就累计次数或星级。"""
     merge_default_catalogs(state)
-    season_id = state.get("season", {}).get("season_id")
+    season = state.get("season", {})
+    season_id = season.get("season_id")
+    season_active = season.get("status") == "active"
     practices = [item for item in state.get("practice_records", []) if isinstance(item, dict)]
     ability_practices = [item for item in practices if item.get("counts_for_ability", True)]
     assessments = [item for item in state.get("assessments", []) if item.get("ranked")]
-    season_assessments = [item for item in assessments if item.get("season_id") == season_id]
     attendance = [item for item in state.get("attendance", {}).get("records", []) if isinstance(item, dict)]
     effective = [item for item in attendance if item.get("counts_as_effective")]
     resolved = [item for item in state.get("wrong_answers", []) if item.get("status") == "resolved"]
@@ -580,6 +583,18 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
         "refs": [str(item.get("portfolio_id")) for item in portfolio if item.get("portfolio_id")],
     }
     growth_results = _growth_results(ability_practices, portfolio)
+    season_growth_results = _growth_results(
+        [
+            item
+            for item in ability_practices
+            if season_active and item.get("season_id") == season_id
+        ],
+        [
+            item
+            for item in portfolio
+            if season_active and item.get("season_id") == season_id
+        ],
+    )
 
     single_matches: dict[str, tuple[int, list[str]]] = {}
     for medal in state["medals"]:
@@ -616,10 +631,22 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
     strength_unlocked = sum(item.get("status") == "unlocked" for item in state["medals"] if item.get("category") == "实力勋章")
     growth_earned = sum(int(item.get("times_earned", 0)) for item in state["medals"] if item.get("category") == "成长成就")
     full_sims_all = [item for item in state.get("assessments", []) if item.get("conditions", {}).get("full_simulation")]
-    season_full_sims = [item for item in full_sims_all if item.get("season_id") == season_id]
+    season_full_sims = [
+        item
+        for item in full_sims_all
+        if season_active and item.get("season_id") == season_id
+    ]
     planned = [item for item in attendance if item.get("status") != "planned_rest"]
-    season_planned = [item for item in planned if item.get("season_id") == season_id]
-    season_effective = [item for item in effective if item.get("season_id") == season_id]
+    season_planned = [
+        item
+        for item in planned
+        if season_active and item.get("season_id") == season_id
+    ]
+    season_effective = [
+        item
+        for item in effective
+        if season_active and item.get("season_id") == season_id
+    ]
     completed_tasks = len([item for item in state.get("task_history", []) if item.get("status") in {"verified", "reward_ready", "revealed"}]) + int(state.get("daily_quest", {}).get("status") in {"verified", "reward_ready", "revealed"})
     unlocked_skills = [item for item in state.get("catalog", []) if item.get("status") in {"discovered", "owned", "mastered"}]
     facts = {
@@ -634,8 +661,8 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
         "shenlun_skills": len([item for item in unlocked_skills if item.get("subject") == "申论"]), "recoveries": len([item for item in attendance if item.get("status") == "recovery"]),
         "subjects_on_target": 0, "season_attendance_rate": round(len(season_effective) / len(season_planned) * 100) if season_planned else 0,
         "season_completed_tasks": int(state.get("season", {}).get("season_completed_tasks", 0)), "season_full_simulations": len(season_full_sims),
-        "season_sealed_errors": len([item for item in sealed if item.get("season_id") == season_id]), "season_ranked": int(state.get("season", {}).get("rank") != "未定级"),
-        "season_recoveries": len([item for item in attendance if item.get("season_id") == season_id and item.get("status") == "recovery"]), "season_growth": int(growth_earned > 0),
+        "season_sealed_errors": len([item for item in sealed if season_active and item.get("season_id") == season_id]), "season_ranked": int(season_active and state.get("season", {}).get("rank") != "未定级"),
+        "season_recoveries": len([item for item in attendance if season_active and item.get("season_id") == season_id and item.get("status") == "recovery"]), "season_growth": int(any(current > 0 for current, _refs in season_growth_results.values())),
     }
     for module in {item.get("module") for item in state.get("catalog", [])}:
         module_items = [item for item in state.get("catalog", []) if item.get("module") == module]
@@ -654,12 +681,38 @@ def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
             )
         else:
             current, refs = int(facts.get(kind, 0)), []
-        if kind == "effective_days": refs = [f"attendance:{item.get('date')}" for item in effective]
-        elif kind in {"resolved_wrongs", "resolved_retests"}: refs = [str(item.get("wrong_id")) for item in resolved]
-        elif kind in {"sealed_errors", "season_sealed_errors"}: refs = [str(item.get("error_hunt_id")) for item in sealed]
-        elif kind in {"shenlun_answers"}: refs = [str(item.get("portfolio_id")) for item in portfolio]
-        elif kind in {"ranked_assessments", "full_simulations_all", "season_full_simulations"}: refs = _assessment_refs(assessments if kind == "ranked_assessments" else full_sims_all)
-        elif current: refs = [f"fact:{kind}:{current}"]
+        if kind == "effective_days":
+            refs = [f"attendance:{item.get('date')}" for item in effective]
+        elif kind in {"resolved_wrongs", "resolved_retests"}:
+            refs = [str(item.get("wrong_id")) for item in resolved]
+        elif kind in {"sealed_errors", "season_sealed_errors"}:
+            matching = (
+                [
+                    item
+                    for item in sealed
+                    if season_active and item.get("season_id") == season_id
+                ]
+                if kind == "season_sealed_errors"
+                else sealed
+            )
+            refs = [str(item.get("error_hunt_id")) for item in matching]
+        elif kind == "shenlun_answers":
+            refs = [str(item.get("portfolio_id")) for item in portfolio]
+        elif kind in {
+            "ranked_assessments",
+            "full_simulations_all",
+            "season_full_simulations",
+        }:
+            matching = (
+                assessments
+                if kind == "ranked_assessments"
+                else season_full_sims
+                if kind == "season_full_simulations"
+                else full_sims_all
+            )
+            refs = _assessment_refs(matching)
+        elif current:
+            refs = [f"fact:{kind}:{current}"]
         target = int(condition["target"])
         previous_refs = medal.get("evidence_refs", []) if medal.get("status") == "unlocked" else []
         medal["progress_target"] = target
