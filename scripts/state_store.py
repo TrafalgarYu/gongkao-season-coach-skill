@@ -1,5 +1,10 @@
 """
 版本记录：
+- v1.7.0 / 2026-08-31
+  - 正确率与速度允许分开入账，练习记录可缺少用时但必须保留真实题量和正确数。
+  - 练习记录增加 11 项能力归类、记录类型和是否进入长期能力统计。
+  - 迁移 1.6 状态时从技能证据与验证备注提取历史练习，并重建五类成就。
+  - 每日任务的成就目标改为可选提示，可继续指向已点亮的重复成就。
 - v1.6.0 / 2026-08-31
   - 状态新增练习战绩，统一保存题量、正确数、实际用时和派生指标。
   - 迁移时从完整旧证据提取练习战绩，并按 40 枚新目录重新计算勋章。
@@ -38,6 +43,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -50,16 +56,20 @@ from typing import Any
 
 try:
     from scripts.catalogs import (
+        ABILITY_SPECS,
         default_medals,
         default_skills,
+        infer_ability_id,
         merge_default_catalogs,
         rebuild_medals,
         refresh_medals,
     )
 except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
     from catalogs import (
+        ABILITY_SPECS,
         default_medals,
         default_skills,
+        infer_ability_id,
         merge_default_catalogs,
         rebuild_medals,
         refresh_medals,
@@ -75,8 +85,8 @@ try:
 except ModuleNotFoundError:  # 直接执行 scripts/state_store.py
     from normalization import normalize_legacy_state
 
-SCHEMA_VERSION = "1.6"
-RULESET_VERSION = "1.6.0"
+SCHEMA_VERSION = "1.7"
+RULESET_VERSION = "1.7.0"
 STATE_ENV_VAR = "GONGKAO_SEASON_COACH_STATE"
 LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -107,6 +117,7 @@ SUPPORTED_OLD_SCHEMAS = {
     "1.3",
     "1.4",
     "1.5",
+    "1.6",
 }
 
 
@@ -124,7 +135,7 @@ def now_iso() -> str:
 
 
 def default_state(timestamp: str | None = None) -> dict[str, Any]:
-    """创建 schema 1.6 的空状态。"""
+    """创建 schema 1.7 的空状态。"""
     return {
         "schema_version": SCHEMA_VERSION,
         "engine": {
@@ -370,7 +381,7 @@ def _legacy_metric(result: Mapping[str, Any], names: tuple[str, ...]) -> Any:
 def _extract_legacy_practice_records(
     state: dict[str, Any], old_version: str
 ) -> dict[str, Any]:
-    """只从字段齐全的旧技能证据提取练习战绩，不推测题量或实际用时。"""
+    """从旧技能证据提取练习；正确率与用时分开保留。"""
     tasks = {
         item.get("task_id"): item
         for item in state.get("task_history", [])
@@ -386,6 +397,8 @@ def _extract_legacy_practice_records(
         "skipped_missing_question_count": 0,
         "skipped_missing_correct_count": 0,
         "skipped_missing_duration_seconds": 0,
+        "accuracy_only_records": 0,
+        "duration_recovered_from_text": 0,
     }
     existing = {
         item.get("practice_id"): item
@@ -419,13 +432,27 @@ def _extract_legacy_practice_records(
             duration_seconds = _legacy_metric(
                 result, ("duration_seconds", "elapsed_seconds", "time_seconds")
             )
+            task_id = evidence.get("task_id")
+            task = tasks.get(task_id, {})
+            verification = task.get("verification") if isinstance(task, Mapping) else {}
+            text_sources = [str(evidence.get("submission_ref") or "")]
+            if isinstance(verification, Mapping):
+                text_sources.append(str(verification.get("note") or ""))
+            if duration_seconds is None:
+                text = " ".join(text_sources)
+                match = re.search(r"(?P<minutes>\d+)\s*分(?P<seconds>\d+)\s*秒", text)
+                if not match:
+                    match = re.search(r"(?<!\d)(?P<minutes>\d{1,3}):(?P<seconds>\d{2})(?!\d)", text)
+                if match:
+                    duration_seconds = int(match.group("minutes")) * 60 + int(match.group("seconds"))
+                    report["duration_recovered_from_text"] += 1
             if question_count is None:
                 report["skipped_missing_question_count"] += 1
             if correct_count is None:
                 report["skipped_missing_correct_count"] += 1
             if duration_seconds is None:
                 report["skipped_missing_duration_seconds"] += 1
-            if None in (question_count, correct_count, duration_seconds):
+            if None in (question_count, correct_count):
                 continue
             if any(
                 isinstance(value, bool) for value in (question_count, correct_count)
@@ -439,13 +466,15 @@ def _extract_legacy_practice_records(
                 question_count <= 0
                 or correct_count < 0
                 or correct_count > question_count
-                or isinstance(duration_seconds, bool)
+            ):
+                continue
+            if duration_seconds is not None and (
+                isinstance(duration_seconds, bool)
                 or not isinstance(duration_seconds, (int, float))
                 or duration_seconds <= 0
             ):
-                continue
+                duration_seconds = None
 
-            task_id = evidence.get("task_id")
             submission_ref = evidence.get("submission_ref") or evidence.get(
                 "evidence_id"
             )
@@ -453,11 +482,15 @@ def _extract_legacy_practice_records(
             record_key = (task_id, submission_ref, module)
             if record_key in seen_keys:
                 continue
-            task = tasks.get(task_id, {})
             locked = task.get("locked_conditions")
             locked_mapping = locked if isinstance(locked, Mapping) else {}
             accuracy_rate = round(correct_count / question_count * 100, 2)
-            seconds_per_question = round(duration_seconds / question_count, 2)
+            seconds_per_question = (
+                round(duration_seconds / question_count, 2)
+                if duration_seconds is not None
+                else None
+            )
+            is_retest = "retest" in str(task_id).lower() or "复测" in " ".join(text_sources)
             record = {
                 "practice_id": _stable_legacy_id(
                     "practice",
@@ -479,6 +512,7 @@ def _extract_legacy_practice_records(
                 "date": str(evidence.get("tested_at") or "")[:10] or None,
                 "subject": "行测",
                 "module": module,
+                "ability_id": infer_ability_id(module, skill.get("name")),
                 "question_count": question_count,
                 "correct_count": correct_count,
                 "accuracy_rate": accuracy_rate,
@@ -487,10 +521,14 @@ def _extract_legacy_practice_records(
                 "source": locked_mapping.get("source") or result.get("source"),
                 "locked_before_start": bool(locked_mapping),
                 "ruleset_version": f"legacy-{old_version}",
+                "record_type": "retest" if is_retest else "task_practice",
+                "counts_for_ability": not is_retest,
             }
             existing[record["practice_id"]] = record
             seen_keys.add(record_key)
             report["practice_records_extracted"] += 1
+            if duration_seconds is None:
+                report["accuracy_only_records"] += 1
 
     state["practice_records"] = list(existing.values())
     return report
@@ -499,7 +537,7 @@ def _extract_legacy_practice_records(
 def migrate_state(
     state: Mapping[str, Any], timestamp: str | None = None
 ) -> dict[str, Any]:
-    """把旧状态迁移到 1.6，保留事实并重建量化勋章。"""
+    """把旧状态迁移到 1.7，保留事实并重建五类成就。"""
     old_version = str(state.get("schema_version", ""))
     if old_version == SCHEMA_VERSION:
         migrated = copy.deepcopy(dict(state))
@@ -644,6 +682,7 @@ def migrate_state(
             "date": None,
             "subject": "行测",
             "module": None,
+            "ability_id": None,
             "question_count": None,
             "correct_count": None,
             "accuracy_rate": None,
@@ -652,6 +691,8 @@ def migrate_state(
             "source": None,
             "locked_before_start": False,
             "ruleset_version": f"legacy-{old_version}",
+            "record_type": "task_practice",
+            "counts_for_ability": True,
         },
         "assessments": {
             "date": None,
@@ -704,6 +745,8 @@ def migrate_state(
             "progress_unit": "项",
             "evidence_refs": [],
             "unlocked_at": None,
+            "repeatable": False,
+            "times_earned": 0,
         },
         "review_queue": {
             "target_type": None,
@@ -763,6 +806,16 @@ def migrate_state(
     }
     for collection_name, defaults in item_defaults.items():
         _fill_item_defaults(migrated.get(collection_name), defaults)
+
+    for record in migrated.get("practice_records", []):
+        if not isinstance(record, dict):
+            continue
+        if not record.get("ability_id"):
+            hint = " ".join(
+                str(record.get(key) or "")
+                for key in ("source", "submission_ref")
+            )
+            record["ability_id"] = infer_ability_id(record.get("module"), hint)
 
     for collection_name in (
         "catalog",
@@ -1089,6 +1142,18 @@ def start_new_season(
     next_state["module_rankings"] = []
     next_state["subject_rankings"] = []
     next_state["daily_quest"] = copy.deepcopy(default_state()["daily_quest"])
+    for medal in next_state["medals"]:
+        if medal.get("category") != "赛季成就":
+            continue
+        medal.update(
+            {
+                "status": "locked",
+                "progress_current": 0,
+                "evidence_refs": [],
+                "unlocked_at": None,
+                "times_earned": 0,
+            }
+        )
     try:
         season_start = datetime.fromisoformat(start_date).date()
     except ValueError as exc:
@@ -1205,7 +1270,7 @@ def _validate_score_fields(item: Mapping[str, Any], label: str) -> None:
 
 
 def validate_state(state: Mapping[str, Any]) -> None:
-    """校验 schema 1.6 的关键类型、唯一约束与业务不变量。"""
+    """校验 schema 1.7 的关键类型、唯一约束与业务不变量。"""
     _require_type(state, Mapping, "state")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise StateError(
@@ -1313,6 +1378,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "date",
             "subject",
             "module",
+            "ability_id",
             "question_count",
             "correct_count",
             "accuracy_rate",
@@ -1321,6 +1387,8 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "source",
             "locked_before_start",
             "ruleset_version",
+            "record_type",
+            "counts_for_ability",
         ),
         "assessments": (
             "assessment_id",
@@ -1383,6 +1451,8 @@ def validate_state(state: Mapping[str, Any]) -> None:
             "progress_unit",
             "evidence_refs",
             "unlocked_at",
+            "repeatable",
+            "times_earned",
         ),
         "review_queue": (
             "review_id",
@@ -1669,28 +1739,20 @@ def validate_state(state: Mapping[str, Any]) -> None:
             )
     _require_unique(option_ids, "daily_quest.options.task_id")
     fixed_medal_ids = {item["medal_id"] for item in default_medals()}
-    locked_medal_ids = {
-        item.get("medal_id")
-        for item in state["medals"]
-        if item.get("status") == "locked" and item.get("medal_id") in fixed_medal_ids
-    }
-    if locked_medal_ids:
-        for index, option in enumerate(quest["options"]):
-            option_ruleset = option.get("ruleset_version") or state["season"].get(
-                "ruleset_version"
+    for index, option in enumerate(quest["options"]):
+        option_ruleset = option.get("ruleset_version") or state["season"].get(
+            "ruleset_version"
+        )
+        if option_ruleset != RULESET_VERSION:
+            continue
+        targets = option.get("medal_targets", [])
+        if not isinstance(targets, list):
+            raise StateError(f"daily_quest.options[{index}].medal_targets 必须是数组。")
+        unknown = set(targets) - fixed_medal_ids
+        if unknown:
+            raise StateError(
+                f"daily_quest.options[{index}].medal_targets 无效：{sorted(unknown)}"
             )
-            if option_ruleset != RULESET_VERSION:
-                continue
-            targets = option.get("medal_targets")
-            if not isinstance(targets, list) or not targets:
-                raise StateError(
-                    f"daily_quest.options[{index}] 必须推进至少一枚未点亮勋章。"
-                )
-            unknown = set(targets) - locked_medal_ids
-            if unknown:
-                raise StateError(
-                    f"daily_quest.options[{index}].medal_targets 无效：{sorted(unknown)}"
-                )
     accepted_task_id = quest.get("accepted_task_id")
     if accepted_task_id is not None:
         if accepted_task_id not in option_ids:
@@ -1845,11 +1907,8 @@ def validate_state(state: Mapping[str, Any]) -> None:
     ):
         raise StateError("catalog 必须恰好包含 70 项标准技能，不得创建自定义技能。")
     expected_medal_ids = {item["medal_id"] for item in default_medals()}
-    if (
-        len(state["medals"]) != 40
-        or {item.get("medal_id") for item in state["medals"]} != expected_medal_ids
-    ):
-        raise StateError("medals 必须恰好包含 40 枚固定勋章。")
+    if {item.get("medal_id") for item in state["medals"]} != expected_medal_ids:
+        raise StateError("medals 必须恰好包含当前五类固定成就目录。")
     for index, skill in enumerate(state["catalog"]):
         status = skill.get("status")
         if status not in {"silhouette", "discovered", "owned", "mastered"}:
@@ -1945,7 +2004,7 @@ def validate_state(state: Mapping[str, Any]) -> None:
         if rank_delta and not assessment.get("ranked", False):
             raise StateError(f"assessments[{index}] 非 ranked 但改变了星级。")
         if assessment.get("ruleset_version") == RULESET_VERSION and rank_delta:
-            raise StateError("1.6 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
+            raise StateError("1.7 规则使用本赛季战绩计算段位，rank_delta 必须为 0。")
     _require_unique(assessment_ids, "assessments.assessment_id")
 
     xingce_modules = {"资料分析", "数量关系", "言语理解", "判断推理", "常识判断"}
@@ -1968,7 +2027,9 @@ def validate_state(state: Mapping[str, Any]) -> None:
         duration = record.get("duration_seconds")
         seconds_per_question = record.get("seconds_per_question")
         accuracy_rate = record.get("accuracy_rate")
-        if any(
+        if (duration is None) != (seconds_per_question is None):
+            raise StateError(f"practice_records[{index}] 总用时与平均用时必须同时存在或同时为空。")
+        if duration is not None and any(
             isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
             for value in (duration, seconds_per_question)
         ):
@@ -1980,11 +2041,19 @@ def validate_state(state: Mapping[str, Any]) -> None:
         ):
             raise StateError(f"practice_records[{index}] 正确率无效。")
         expected_accuracy = round(correct_count / question_count * 100, 2)
-        expected_seconds = round(duration / question_count, 2)
         if abs(accuracy_rate - expected_accuracy) > 0.01:
             raise StateError(f"practice_records[{index}] 正确率与题量不一致。")
-        if abs(seconds_per_question - expected_seconds) > 0.01:
+        if duration is not None and abs(seconds_per_question - round(duration / question_count, 2)) > 0.01:
             raise StateError(f"practice_records[{index}] 平均用时与总用时不一致。")
+        if infer_ability_id(record.get("module"), None) is None and not record.get("ability_id"):
+            raise StateError(f"practice_records[{index}].ability_id 缺失。")
+        valid_abilities = {item[0] for item in ABILITY_SPECS if item[0] != "shenlun"}
+        if record.get("ability_id") not in valid_abilities:
+            raise StateError(f"practice_records[{index}].ability_id 无效。")
+        if record.get("record_type") not in {"task_practice", "free_practice", "full_mock", "retest"}:
+            raise StateError(f"practice_records[{index}].record_type 无效。")
+        if not isinstance(record.get("counts_for_ability"), bool):
+            raise StateError(f"practice_records[{index}].counts_for_ability 必须是布尔值。")
         if not isinstance(record.get("locked_before_start"), bool):
             raise StateError(
                 f"practice_records[{index}].locked_before_start 必须是布尔值。"
@@ -2104,6 +2173,10 @@ def validate_state(state: Mapping[str, Any]) -> None:
             value = medal.get(field)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise StateError(f"medals[{index}].{field} 必须是非负整数。")
+        if not isinstance(medal.get("repeatable"), bool):
+            raise StateError(f"medals[{index}].repeatable 必须是布尔值。")
+        if isinstance(medal.get("times_earned"), bool) or not isinstance(medal.get("times_earned"), int) or medal.get("times_earned") < 0:
+            raise StateError(f"medals[{index}].times_earned 必须是非负整数。")
 
     portfolio_id_set = set(portfolio_ids)
     portfolio_by_id = {
@@ -2389,7 +2462,7 @@ def migrate_file(
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """校验迁移结果；非 dry-run 时备份并原子迁移到 1.6。"""
+    """校验迁移结果；非 dry-run 时备份并原子迁移到 1.7。"""
     with FileLock(_lock_path(state_path)):
         current = read_json(state_path)
         if current.get("schema_version") == SCHEMA_VERSION:

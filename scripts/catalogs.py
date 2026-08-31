@@ -1,5 +1,9 @@
 """
 版本记录：
+- v1.7.0 / 2026-08-31
+  - 建立单次战绩、实力勋章、成长成就、生涯成就和赛季成就五类目录。
+  - 行测练习按 10 个能力项归类，申论单列为第 11 项；正确率或得分率与速度分开结算。
+  - 长期实力采用五档永久勋章，成长成就使用互不重叠窗口，可重复累计次数。
 - v1.6.0 / 2026-08-31
   - 用五个行测模块的 25 枚正确率与用时勋章替换模糊的“考场可用”勋章。
   - 新增练习战绩判定，并把固定勋章目录调整为 40 枚。
@@ -113,7 +117,7 @@ XINGCE_MODULE_IDS = {
     "常识判断": "knowledge",
 }
 
-PERFORMANCE_TIERS = (
+SINGLE_PERFORMANCE_TIERS = (
     ("starter", "崭露头角", 70, 90),
     ("surge", "势如破竹", 80, 80),
     ("elite", "百里挑一", 90, 70),
@@ -121,6 +125,52 @@ PERFORMANCE_TIERS = (
     ("peerless", "天下无双", 100, 55),
 )
 MIN_MEDAL_QUESTIONS = 10
+
+TIER_NAMES = ("起步", "稳定", "熟练", "精准", "极境")
+ACCURACY_CUTS = (60, 70, 80, 90, 95)
+SHENLUN_SCORE_CUTS = (60, 65, 70, 75, 80)
+ABILITY_SPECS = (
+    ("data", "资料分析", "整体模块", (120, 105, 90, 75, 60), 30),
+    ("math", "数量关系", "整体模块", (120, 105, 90, 75, 60), 30),
+    ("knowledge", "常识判断", "整体模块", (45, 40, 35, 30, 25), 30),
+    ("verbal-fill", "逻辑填空", "言语理解", (55, 50, 45, 40, 35), 20),
+    ("verbal-reading", "片段阅读", "言语理解", (75, 68, 62, 58, 55), 20),
+    ("verbal-sentence", "语句表达", "言语理解", (65, 60, 55, 50, 45), 20),
+    ("reasoning-graphic", "图形推理", "判断推理", (60, 55, 50, 45, 40), 20),
+    ("reasoning-definition", "定义判断", "判断推理", (60, 55, 50, 45, 40), 20),
+    ("reasoning-analogy", "类比推理", "判断推理", (45, 40, 35, 30, 25), 20),
+    ("reasoning-logic", "逻辑判断", "判断推理", (90, 80, 70, 60, 55), 20),
+    ("shenlun", "申论作答", "申论", (35, 32, 29, 26, 23), 3),
+)
+ABILITY_BY_ID = {item[0]: item for item in ABILITY_SPECS}
+
+
+def infer_ability_id(module: str | None, skill_name: str | None = None) -> str | None:
+    """把固定模块或技能名归入 11 个能力项。"""
+    if module == "资料分析":
+        return "data"
+    if module == "数量关系":
+        return "math"
+    if module == "常识判断":
+        return "knowledge"
+    if module == "申论":
+        return "shenlun"
+    name = skill_name or ""
+    if module == "言语理解":
+        if any(word in name for word in ("填空", "词义", "搭配", "成语")):
+            return "verbal-fill"
+        if any(word in name for word in ("排序", "衔接", "语句")):
+            return "verbal-sentence"
+        return "verbal-reading"
+    if module == "判断推理":
+        if "图形" in name or "空间" in name:
+            return "reasoning-graphic"
+        if "定义" in name:
+            return "reasoning-definition"
+        if "类比" in name:
+            return "reasoning-analogy"
+        return "reasoning-logic"
+    return None
 
 
 def _slug(index: int) -> str:
@@ -176,13 +226,15 @@ def _medal(
     module: str | None = None,
     condition_extra: dict[str, Any] | None = None,
     progress_unit: str = "项",
+    repeatable: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     condition = {"type": condition_type, "target": target, "scope": scope}
     if module:
         condition["module"] = module
     if condition_extra:
         condition.update(condition_extra)
-    return {
+    item = {
         "medal_id": medal_id,
         "name": name,
         "category": category,
@@ -194,52 +246,24 @@ def _medal(
         "progress_unit": progress_unit,
         "evidence_refs": [],
         "unlocked_at": None,
+        "repeatable": repeatable,
+        "times_earned": 0,
     }
+    if metadata:
+        item.update(metadata)
+    return item
 
 
 def default_medals() -> list[dict[str, Any]]:
-    medals = [
-        _medal(
-            "medal-first-result",
-            "第一份战果",
-            "起步",
-            "完成第一次有效验证入账",
-            "effective_days",
-            1,
-            scope="career",
-        ),
-        _medal(
-            "medal-three-days",
-            "三日开局",
-            "起步",
-            "累计完成 3 个有效学习日",
-            "effective_days",
-            3,
-        ),
-        _medal(
-            "medal-seven-days",
-            "七日成习",
-            "起步",
-            "累计完成 7 个有效学习日",
-            "effective_days",
-            7,
-        ),
-        _medal(
-            "medal-first-ranked",
-            "首次排位",
-            "起步",
-            "完成第一次有效排位测评",
-            "ranked_assessments",
-            1,
-        ),
-    ]
+    medals: list[dict[str, Any]] = []
+    # 单次战绩保留原五模块、五档体系，任意一次提交即可触发并累计次数。
     for module, key in XINGCE_MODULE_IDS.items():
-        for tier_id, tier_name, accuracy_min, seconds_max in PERFORMANCE_TIERS:
+        for tier_id, tier_name, accuracy_min, seconds_max in SINGLE_PERFORMANCE_TIERS:
             medals.append(
                 _medal(
                     f"medal-{key}-{tier_id}",
                     f"{module}·{tier_name}",
-                    "模块战绩",
+                    "单次战绩",
                     (
                         f"单次至少 {MIN_MEDAL_QUESTIONS} 题，正确率不低于 "
                         f"{accuracy_min}%，平均每题不超过 {seconds_max} 秒"
@@ -254,103 +278,90 @@ def default_medals() -> list[dict[str, Any]]:
                         "tier": tier_id,
                     },
                     progress_unit="次达标",
+                    repeatable=True,
+                    metadata={"tier": tier_id, "module": module},
                 )
             )
-    medals.extend(
-        [
-            _medal(
-                "medal-first-correction",
-                "第一次订正",
-                "纠错",
-                "完成 1 道错题订正",
-                "resolved_wrongs",
-                1,
-            ),
-            _medal(
-                "medal-ten-wrongs",
-                "错题十清",
-                "纠错",
-                "累计解决 10 道错题",
-                "resolved_wrongs",
-                10,
-            ),
-            _medal(
-                "medal-five-easy-points",
-                "易错点封印",
-                "纠错",
-                "累计解决 5 个易错点",
-                "sealed_errors",
-                5,
-            ),
-            _medal(
-                "medal-module-gold",
-                "模块黄金",
-                "战绩",
-                "任一模块达到黄金段位",
-                "gold_modules",
-                1,
-            ),
-            _medal(
-                "medal-xingce-target",
-                "行测达标",
-                "战绩",
-                "行测有效全卷达到目标分",
-                "xingce_target",
-                1,
-            ),
-            _medal(
-                "medal-shenlun-target",
-                "申论达标",
-                "战绩",
-                "申论可比完整评分达到目标分",
-                "shenlun_target",
-                1,
-            ),
-            _medal(
-                "medal-both-stable",
-                "双科稳定",
-                "战绩",
-                "行测和申论均完成本赛季定级",
-                "ranked_subjects",
-                2,
-                scope="season",
-            ),
-            _medal(
-                "medal-overall-master",
-                "综合大师",
-                "战绩",
-                "综合段位达到大师",
-                "overall_master",
-                1,
-                scope="season",
-            ),
-            _medal(
-                "medal-season-finish",
-                "赛季收官",
-                "赛季",
-                "完成 1 个正式赛季",
-                "finished_seasons",
-                1,
-            ),
-            _medal(
-                "medal-four-sims",
-                "四次全真",
-                "赛季",
-                "本赛季完成 4 次全真模拟",
-                "full_simulations",
-                4,
-                scope="season",
-            ),
-            _medal(
-                "medal-core-mastered",
-                "五路全能",
-                "赛季",
-                "五个行测模块均至少达到百里挑一标准",
-                "five_modules_elite",
-                5,
-            ),
-        ]
+
+    # 实力勋章按 11 项能力、正确率或得分率与速度两条战线分别设置五档。
+    for ability_id, name, group, time_cuts, window in ABILITY_SPECS:
+        score_cuts = SHENLUN_SCORE_CUTS if ability_id == "shenlun" else ACCURACY_CUTS
+        for metric, cuts, unit in (
+            ("score" if ability_id == "shenlun" else "accuracy", score_cuts, "%"),
+            ("speed", time_cuts, "分钟/题" if ability_id == "shenlun" else "秒/题"),
+        ):
+            for level, (tier_name, cut) in enumerate(zip(TIER_NAMES, cuts), start=1):
+                direction = "不低于" if metric != "speed" else "不超过"
+                medals.append(
+                    _medal(
+                        f"strength-{ability_id}-{metric}-{level}",
+                        f"{name}·{tier_name}",
+                        "实力勋章",
+                        f"{name}{'评分' if metric == 'score' else '正确率' if metric == 'accuracy' else '平均用时'}{direction}{cut}{unit}",
+                        "strength_level",
+                        1,
+                        condition_extra={"ability_id": ability_id, "metric": metric, "cut": cut, "level": level, "sample_min": window},
+                        metadata={"ability_id": ability_id, "ability_name": name, "ability_group": group, "metric": metric, "level": level},
+                    )
+                )
+
+    # 成长成就使用两段互不重叠窗口，可在不同历史区间反复获得。
+    growth_specs = {
+        "accuracy": ((5, "初见起色"), (10, "明显突破"), (15, "弱项逆转")),
+        "speed": ((10, "开始提速"), (20, "节奏突破"), (30, "疾速进阶")),
+    }
+    for ability_id, name, _group, _time_cuts, window in ABILITY_SPECS:
+        for metric, tiers in growth_specs.items():
+            for level, (cut, tier_name) in enumerate(tiers, start=1):
+                medals.append(
+                    _medal(
+                        f"growth-{ability_id}-{metric}-{level}",
+                        f"{name}·{tier_name}",
+                        "成长成就",
+                        f"两个互不重叠的有效窗口中，{('得分率提升' if ability_id == 'shenlun' else '正确率提升') if metric == 'accuracy' else '平均用时降低'}至少 {cut}{'个百分点' if metric == 'accuracy' else '%'}",
+                        "growth_window",
+                        1,
+                        condition_extra={"ability_id": ability_id, "metric": metric, "cut": cut, "window": window, "level": level},
+                        progress_unit="次",
+                        repeatable=True,
+                        metadata={"ability_id": ability_id, "ability_name": name, "metric": metric, "level": level},
+                    )
+                )
+
+    repeatables = (
+        ("career-hundred-questions", "百题行者", "practice_questions", 100, "题"),
+        ("career-ten-wrongs", "错题十清", "resolved_wrongs", 10, "题"),
+        ("career-ten-essays", "申论十篇", "shenlun_answers", 10, "篇"),
+        ("career-attendance-week", "有效出勤周", "effective_days", 6, "天"),
+        ("career-five-mocks", "模考征程", "full_simulations_all", 5, "次"),
+        ("career-ten-retests", "复测闭环", "resolved_retests", 10, "题"),
     )
+    for medal_id, name, kind, target, unit in repeatables:
+        medals.append(_medal(medal_id, name, "生涯成就", f"每累计 {target}{unit}增加 1 星", kind, target, progress_unit=unit, repeatable=True, metadata={"career_kind": "repeatable"}))
+
+    milestones = (
+        ("first-result", "第一份战果", "effective_days", 1), ("first-task", "任务开张", "completed_tasks", 1),
+        ("first-free-practice", "自主出击", "free_practices", 1), ("first-correction", "第一次订正", "resolved_wrongs", 1),
+        ("first-retest", "延迟复测", "completed_retests", 1), ("first-counter", "反制形成", "countered_errors", 1),
+        ("first-seal", "弱点封印", "sealed_errors", 1), ("first-essay", "申论落笔", "shenlun_answers", 1),
+        ("first-mock", "第一次全卷", "full_simulations_all", 1), ("first-ranked", "首次排位", "ranked_assessments", 1),
+        ("first-record", "刷新纪录", "personal_records", 1), ("first-strength", "第一枚勋章", "strength_unlocked", 1),
+        ("first-growth", "初见起色", "growth_earned", 1), ("five-modules", "五域留痕", "measured_modules", 5),
+        ("eleven-abilities", "十一项建档", "measured_abilities", 11), ("first-skill-module", "模块全解锁", "complete_skill_modules", 1),
+        ("all-xingce-skills", "行测技能贯通", "xingce_skills", 56), ("all-shenlun-skills", "申论技能贯通", "shenlun_skills", 14),
+        ("first-return", "重新出发", "recoveries", 1), ("both-targets", "双科达标", "subjects_on_target", 2),
+    )
+    for key, name, kind, target in milestones:
+        medals.append(_medal(f"career-{key}", name, "生涯成就", f"满足里程碑：{name}", kind, target, metadata={"career_kind": "milestone"}))
+
+    season_specs = (
+        ("attendance", "赛季出勤", "season_attendance_rate", 80, "%"), ("tasks", "主任务推进", "season_completed_tasks", 10, "项"),
+        ("mocks", "赛季模考", "season_full_simulations", 4, "次"), ("weakness", "核心弱点解决", "season_sealed_errors", 1, "项"),
+        ("rank", "赛季段位", "season_ranked", 1, "次"), ("recovery", "赛季复归", "season_recoveries", 1, "次"),
+        ("growth", "赛季最大进步", "season_growth", 1, "项"),
+    )
+    for key, name, kind, target, unit in season_specs:
+        medals.append(_medal(f"season-{key}", name, "赛季成就", f"当前赛季达到{name}条件", kind, target, scope="season", progress_unit=unit))
     return medals
 
 
@@ -409,6 +420,7 @@ def merge_default_catalogs(state: dict[str, Any]) -> None:
                 "progress_current",
                 "evidence_refs",
                 "unlocked_at",
+                "times_earned",
             ):
                 if key in current:
                     item[key] = copy.deepcopy(current[key])
@@ -424,161 +436,243 @@ def _assessment_refs(items: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _window_blocks(
+    rows: list[dict[str, Any]], window_size: int, *, shenlun: bool = False
+) -> list[list[dict[str, Any]]]:
+    """按时间生成互不重叠的完整窗口；行测每窗至少包含两次练习。"""
+    ordered = sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("date") or item.get("submitted_at") or ""),
+            str(item.get("practice_id") or item.get("portfolio_id") or ""),
+        ),
+    )
+    blocks: list[list[dict[str, Any]]] = []
+    block: list[dict[str, Any]] = []
+    volume = 0
+    for item in ordered:
+        block.append(item)
+        volume += 1 if shenlun else int(item.get("question_count") or 0)
+        minimum_sessions = 1 if shenlun else 2
+        if volume >= window_size and len(block) >= minimum_sessions:
+            blocks.append(block)
+            block = []
+            volume = 0
+    return blocks
+
+
+def _growth_results(
+    ability_practices: list[dict[str, Any]],
+    portfolio: list[dict[str, Any]],
+) -> dict[tuple[str, str, int], tuple[int, list[str]]]:
+    """结算互不复用证据的相邻窗口提升次数。"""
+    results: dict[tuple[str, str, int], tuple[int, list[str]]] = {}
+    for ability_id, _name, _group, _time_cuts, window_size in ABILITY_SPECS:
+        shenlun = ability_id == "shenlun"
+        if shenlun:
+            rows = [
+                item
+                for item in portfolio
+                if isinstance(item.get("score_rate"), (int, float))
+                and item.get("score_source") != "ai_internal"
+                and item.get("normalization_status") == "exact"
+            ]
+        else:
+            rows = [
+                item
+                for item in ability_practices
+                if item.get("ability_id") == ability_id
+                and int(item.get("question_count") or 0) > 0
+            ]
+        blocks = _window_blocks(rows, window_size, shenlun=shenlun)
+        hits = {(metric, level): [] for metric in ("accuracy", "speed") for level in range(1, 4)}
+        for index in range(0, len(blocks) - 1, 2):
+            previous, current = blocks[index], blocks[index + 1]
+            pair = [*previous, *current]
+            ref_key = "portfolio_id" if shenlun else "practice_id"
+            refs = [str(item.get(ref_key)) for item in pair if item.get(ref_key)]
+            if shenlun:
+                old_accuracy = sum(float(item["score_rate"]) for item in previous) / len(previous)
+                new_accuracy = sum(float(item["score_rate"]) for item in current) / len(current)
+                timed = all(isinstance(item.get("time_minutes"), (int, float)) for item in pair)
+                old_speed = sum(float(item["time_minutes"]) for item in previous) / len(previous) if timed else None
+                new_speed = sum(float(item["time_minutes"]) for item in current) / len(current) if timed else None
+            else:
+                old_questions = sum(int(item["question_count"]) for item in previous)
+                new_questions = sum(int(item["question_count"]) for item in current)
+                old_accuracy = sum(int(item["correct_count"]) for item in previous) / old_questions * 100
+                new_accuracy = sum(int(item["correct_count"]) for item in current) / new_questions * 100
+                timed = all(isinstance(item.get("duration_seconds"), (int, float)) for item in pair)
+                old_speed = sum(float(item["duration_seconds"]) for item in previous) / old_questions if timed else None
+                new_speed = sum(float(item["duration_seconds"]) for item in current) / new_questions if timed else None
+            accuracy_gain = round(new_accuracy - old_accuracy, 6)
+            for level, cut in enumerate((5, 10, 15), start=1):
+                if accuracy_gain >= cut:
+                    hits[("accuracy", level)].extend(refs)
+            if old_speed and new_speed is not None and new_accuracy >= old_accuracy - 5:
+                speed_gain = round((old_speed - new_speed) / old_speed * 100, 6)
+                for level, cut in enumerate((10, 20, 30), start=1):
+                    if speed_gain >= cut:
+                        hits[("speed", level)].extend(refs)
+        for (metric, level), refs in hits.items():
+            # 每个达标窗口对贡献一次；每对证据至少有两个引用。
+            pair_size = window_size * 2 if shenlun else None
+            if shenlun:
+                count = len(refs) // pair_size
+            else:
+                qualifying_refs = set(refs)
+                count = sum(
+                    1
+                    for index in range(0, len(blocks) - 1, 2)
+                    if {
+                        str(item.get("practice_id"))
+                        for item in [*blocks[index], *blocks[index + 1]]
+                        if item.get("practice_id")
+                    }.issubset(qualifying_refs)
+                )
+            results[(ability_id, metric, level)] = (count, list(dict.fromkeys(refs)))
+    return results
+
+
 def refresh_medals(state: dict[str, Any], timestamp: str | None = None) -> None:
-    """按状态事实刷新勋章进度；已点亮勋章不会回退。"""
+    """按事实刷新五类成就；永久档位不回退，重复成就累计次数或星级。"""
     merge_default_catalogs(state)
     season_id = state.get("season", {}).get("season_id")
+    practices = [item for item in state.get("practice_records", []) if isinstance(item, dict)]
+    ability_practices = [item for item in practices if item.get("counts_for_ability", True)]
     assessments = [item for item in state.get("assessments", []) if item.get("ranked")]
-    season_assessments = [
-        item for item in assessments if item.get("season_id") == season_id
-    ]
-    effective = [
+    season_assessments = [item for item in assessments if item.get("season_id") == season_id]
+    attendance = [item for item in state.get("attendance", {}).get("records", []) if isinstance(item, dict)]
+    effective = [item for item in attendance if item.get("counts_as_effective")]
+    resolved = [item for item in state.get("wrong_answers", []) if item.get("status") == "resolved"]
+    sealed = [item for item in state.get("error_hunts", []) if item.get("status") == "sealed"]
+    countered = [item for item in state.get("error_hunts", []) if item.get("status") in {"countered", "sealed"}]
+    portfolio = [item for item in state.get("shenlun_portfolio", []) if isinstance(item, dict)]
+
+    ability_stats: dict[str, dict[str, Any]] = {}
+    for ability_id, _name, _group, _cuts, _window in ABILITY_SPECS:
+        rows = [item for item in ability_practices if item.get("ability_id") == ability_id]
+        refs = [str(item.get("practice_id")) for item in rows if item.get("practice_id")]
+        questions = sum(int(item.get("question_count") or 0) for item in rows)
+        correct = sum(int(item.get("correct_count") or 0) for item in rows)
+        timed = [item for item in rows if isinstance(item.get("duration_seconds"), (int, float))]
+        timed_questions = sum(int(item.get("question_count") or 0) for item in timed)
+        duration = sum(float(item["duration_seconds"]) for item in timed)
+        ability_stats[ability_id] = {
+            "accuracy": round(correct / questions * 100, 2) if questions else None,
+            "speed": round(duration / timed_questions, 2) if timed_questions else None,
+            "questions": questions,
+            "timed_questions": timed_questions,
+            "refs": refs,
+        }
+    scored = [
         item
-        for item in state.get("attendance", {}).get("records", [])
-        if item.get("counts_as_effective")
-    ]
-    resolved = [
-        item
-        for item in state.get("wrong_answers", [])
-        if item.get("status") == "resolved"
-    ]
-    sealed = [
-        item for item in state.get("error_hunts", []) if item.get("status") == "sealed"
-    ]
-    practice_records = [
-        item for item in state.get("practice_records", []) if isinstance(item, dict)
-    ]
-    gold_order = {
-        "未定级": 0,
-        "青铜": 1,
-        "白银": 2,
-        "黄金": 3,
-        "钻石": 4,
-        "大师": 5,
-        "王者": 6,
-    }
-    gold_modules = [
-        item
-        for item in state.get("module_rankings", [])
-        if gold_order.get(item.get("rank"), 0) >= 3
-    ]
-    subject_ranked = [
-        item
-        for item in state.get("subject_rankings", [])
-        if item.get("season_id") == season_id and item.get("rank") != "未定级"
-    ]
-    x_target = state.get("goal_contract", {}).get("xingce_target")
-    s_target = state.get("goal_contract", {}).get("shenlun_target")
-    x_hits = [
-        item
-        for item in assessments
-        if item.get("subject") == "行测"
-        and x_target is not None
-        and isinstance(item.get("score"), (int, float))
-        and item["score"] >= x_target
-    ]
-    s_hits = [
-        item
-        for item in assessments
-        if item.get("subject") == "申论"
-        and s_target is not None
+        for item in portfolio
+        if isinstance(item.get("score_rate"), (int, float))
         and item.get("score_source") != "ai_internal"
-        and isinstance(item.get("score"), (int, float))
-        and item["score"] >= s_target
+        and item.get("normalization_status") == "exact"
     ]
-    full_sims = [
-        item
-        for item in season_assessments
-        if item.get("conditions", {}).get("full_simulation")
-    ]
-    elite_modules: dict[str, list[str]] = {}
-    for module in XINGCE_MODULE_IDS:
-        refs = [
-            str(item.get("practice_id"))
-            for item in practice_records
-            if item.get("module") == module
-            and item.get("locked_before_start") is True
-            and item.get("question_count", 0) >= MIN_MEDAL_QUESTIONS
-            and item.get("accuracy_rate", 0) >= 90
-            and item.get("seconds_per_question", float("inf")) <= 70
-            and item.get("practice_id")
-        ]
-        if refs:
-            elite_modules[module] = refs
+    timed_essays = [item for item in portfolio if isinstance(item.get("time_minutes"), (int, float))]
+    ability_stats["shenlun"] = {
+        "score": round(sum(float(item["score_rate"]) for item in scored) / len(scored), 2) if scored else None,
+        "speed": round(sum(float(item["time_minutes"]) for item in timed_essays) / len(timed_essays), 2) if timed_essays else None,
+        "questions": len(scored), "timed_questions": len(timed_essays),
+        "refs": [str(item.get("portfolio_id")) for item in portfolio if item.get("portfolio_id")],
+    }
+    growth_results = _growth_results(ability_practices, portfolio)
+
+    single_matches: dict[str, tuple[int, list[str]]] = {}
+    for medal in state["medals"]:
+        condition = medal["condition"]
+        if condition["type"] != "module_performance":
+            continue
+        matches = [item for item in practices if item.get("module") == condition["module"] and int(item.get("question_count") or 0) >= condition["question_count_min"] and float(item.get("accuracy_rate") or 0) >= condition["accuracy_min"] and isinstance(item.get("seconds_per_question"), (int, float)) and float(item["seconds_per_question"]) <= condition["seconds_per_question_max"]]
+        single_matches[medal["medal_id"]] = (len(matches), [str(item.get("practice_id")) for item in matches if item.get("practice_id")])
+
+    # 先结算单次和实力，以便生涯里程碑引用结果。
+    for medal in state["medals"]:
+        condition = medal["condition"]
+        kind = condition["type"]
+        if kind == "module_performance":
+            current, refs = single_matches[medal["medal_id"]]
+        elif kind == "strength_level":
+            stats = ability_stats[condition["ability_id"]]
+            value = stats.get(condition["metric"])
+            sample_key = "timed_questions" if condition["metric"] == "speed" else "questions"
+            enough_samples = stats[sample_key] >= condition["sample_min"]
+            reached = enough_samples and value is not None and (value <= condition["cut"] if condition["metric"] == "speed" else value >= condition["cut"])
+            current, refs = int(reached), stats["refs"] if reached else []
+        else:
+            continue
+        previous_refs = medal.get("evidence_refs", []) if medal.get("status") == "unlocked" else []
+        medal["progress_current"] = current
+        medal["progress_target"] = condition["target"]
+        medal["times_earned"] = current if medal.get("repeatable") else int(medal.get("status") == "unlocked" or current >= condition["target"])
+        medal["evidence_refs"] = list(dict.fromkeys([*previous_refs, *refs]))
+        if medal.get("status") != "unlocked" and current >= condition["target"] and refs:
+            medal["status"] = "unlocked"
+            medal["unlocked_at"] = timestamp
+
+    strength_unlocked = sum(item.get("status") == "unlocked" for item in state["medals"] if item.get("category") == "实力勋章")
+    growth_earned = sum(int(item.get("times_earned", 0)) for item in state["medals"] if item.get("category") == "成长成就")
+    full_sims_all = [item for item in state.get("assessments", []) if item.get("conditions", {}).get("full_simulation")]
+    season_full_sims = [item for item in full_sims_all if item.get("season_id") == season_id]
+    planned = [item for item in attendance if item.get("status") != "planned_rest"]
+    season_planned = [item for item in planned if item.get("season_id") == season_id]
+    season_effective = [item for item in effective if item.get("season_id") == season_id]
+    completed_tasks = len([item for item in state.get("task_history", []) if item.get("status") in {"verified", "reward_ready", "revealed"}]) + int(state.get("daily_quest", {}).get("status") in {"verified", "reward_ready", "revealed"})
+    unlocked_skills = [item for item in state.get("catalog", []) if item.get("status") in {"discovered", "owned", "mastered"}]
+    facts = {
+        "effective_days": len(effective), "resolved_wrongs": len(resolved), "shenlun_answers": len(portfolio),
+        "practice_questions": sum(int(item.get("question_count") or 0) for item in practices), "full_simulations_all": len(full_sims_all),
+        "resolved_retests": len([item for item in resolved if item.get("status") == "resolved"]), "completed_tasks": completed_tasks,
+        "free_practices": len([item for item in practices if item.get("record_type") == "free_practice"]), "completed_retests": len([item for item in practices if item.get("record_type") == "retest"]),
+        "countered_errors": len(countered), "sealed_errors": len(sealed), "ranked_assessments": len(assessments), "personal_records": 0,
+        "strength_unlocked": strength_unlocked, "growth_earned": growth_earned, "measured_modules": len({item.get("module") for item in practices}),
+        "measured_abilities": len([stats for stats in ability_stats.values() if stats.get("questions")]),
+        "complete_skill_modules": 0, "xingce_skills": len([item for item in unlocked_skills if item.get("subject") == "行测"]),
+        "shenlun_skills": len([item for item in unlocked_skills if item.get("subject") == "申论"]), "recoveries": len([item for item in attendance if item.get("status") == "recovery"]),
+        "subjects_on_target": 0, "season_attendance_rate": round(len(season_effective) / len(season_planned) * 100) if season_planned else 0,
+        "season_completed_tasks": int(state.get("season", {}).get("season_completed_tasks", 0)), "season_full_simulations": len(season_full_sims),
+        "season_sealed_errors": len([item for item in sealed if item.get("season_id") == season_id]), "season_ranked": int(state.get("season", {}).get("rank") != "未定级"),
+        "season_recoveries": len([item for item in attendance if item.get("season_id") == season_id and item.get("status") == "recovery"]), "season_growth": int(growth_earned > 0),
+    }
+    for module in {item.get("module") for item in state.get("catalog", [])}:
+        module_items = [item for item in state.get("catalog", []) if item.get("module") == module]
+        if module_items and all(item.get("status") in {"discovered", "owned", "mastered"} for item in module_items):
+            facts["complete_skill_modules"] += 1
 
     for medal in state["medals"]:
         condition = medal["condition"]
         kind = condition["type"]
-        refs: list[str] = []
-        if kind == "effective_days":
-            current, refs = (
-                len(effective),
-                [f"attendance:{item.get('date')}" for item in effective],
+        if kind in {"module_performance", "strength_level"}:
+            continue
+        if kind == "growth_window":
+            current, refs = growth_results.get(
+                (condition["ability_id"], condition["metric"], condition["level"]),
+                (0, []),
             )
-        elif kind == "ranked_assessments":
-            current, refs = len(assessments), _assessment_refs(assessments)
-        elif kind == "module_performance":
-            matches = [
-                item
-                for item in practice_records
-                if item.get("module") == condition["module"]
-                and item.get("locked_before_start") is True
-                and item.get("question_count", 0) >= condition["question_count_min"]
-                and item.get("accuracy_rate", 0) >= condition["accuracy_min"]
-                and item.get("seconds_per_question", float("inf"))
-                <= condition["seconds_per_question_max"]
-            ]
-            current = len(matches)
-            refs = [
-                str(item["practice_id"]) for item in matches if item.get("practice_id")
-            ]
-        elif kind == "resolved_wrongs":
-            current, refs = len(resolved), [item["wrong_id"] for item in resolved]
-        elif kind == "sealed_errors":
-            current, refs = len(sealed), [item["error_hunt_id"] for item in sealed]
-        elif kind == "gold_modules":
-            current, refs = (
-                len(gold_modules),
-                [item["ranking_id"] for item in gold_modules],
-            )
-        elif kind == "xingce_target":
-            current, refs = len(x_hits), _assessment_refs(x_hits)
-        elif kind == "shenlun_target":
-            current, refs = len(s_hits), _assessment_refs(s_hits)
-        elif kind == "ranked_subjects":
-            current, refs = (
-                len({item.get("subject") for item in subject_ranked}),
-                [item["ranking_id"] for item in subject_ranked],
-            )
-        elif kind == "overall_master":
-            current = int(gold_order.get(state.get("season", {}).get("rank"), 0) >= 5)
-            refs = [str(season_id)] if current else []
-        elif kind == "finished_seasons":
-            current, refs = (
-                len(state.get("season_history", [])),
-                [
-                    str(item.get("season_id"))
-                    for item in state.get("season_history", [])
-                ],
-            )
-        elif kind == "full_simulations":
-            current, refs = len(full_sims), _assessment_refs(full_sims)
-        elif kind == "five_modules_elite":
-            current = len(elite_modules)
-            refs = [ref for values in elite_modules.values() for ref in values]
         else:
-            current = 0
-        if medal.get("status") == "unlocked":
-            current = max(current, condition["target"])
-            refs = [*medal.get("evidence_refs", []), *refs]
-        medal["progress_current"] = current
-        medal["progress_target"] = condition["target"]
-        medal["evidence_refs"] = list(dict.fromkeys(refs))
-        if (
-            medal.get("status") != "unlocked"
-            and current >= condition["target"]
-            and refs
-        ):
+            current, refs = int(facts.get(kind, 0)), []
+        if kind == "effective_days": refs = [f"attendance:{item.get('date')}" for item in effective]
+        elif kind in {"resolved_wrongs", "resolved_retests"}: refs = [str(item.get("wrong_id")) for item in resolved]
+        elif kind in {"sealed_errors", "season_sealed_errors"}: refs = [str(item.get("error_hunt_id")) for item in sealed]
+        elif kind in {"shenlun_answers"}: refs = [str(item.get("portfolio_id")) for item in portfolio]
+        elif kind in {"ranked_assessments", "full_simulations_all", "season_full_simulations"}: refs = _assessment_refs(assessments if kind == "ranked_assessments" else full_sims_all)
+        elif current: refs = [f"fact:{kind}:{current}"]
+        target = int(condition["target"])
+        previous_refs = medal.get("evidence_refs", []) if medal.get("status") == "unlocked" else []
+        medal["progress_target"] = target
+        if medal.get("repeatable"):
+            medal["times_earned"] = current // target
+            medal["progress_current"] = current % target
+            reached = medal["times_earned"] > 0
+        else:
+            medal["progress_current"] = min(current, target)
+            medal["times_earned"] = int(medal.get("status") == "unlocked" or current >= target)
+            reached = current >= target
+        medal["evidence_refs"] = list(dict.fromkeys([*previous_refs, *refs]))
+        if medal.get("status") != "unlocked" and reached and refs:
             medal["status"] = "unlocked"
             medal["unlocked_at"] = timestamp
 

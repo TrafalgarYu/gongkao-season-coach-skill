@@ -1,5 +1,7 @@
 """
 版本记录：
+- v5.0.0 / 2026-08-31
+  - 验证五类成就、11项实力双战线、练习排序和固定错题分类。
 - v4.0.0 / 2026-08-31
   - 验证量化技能页、练习战绩和 40 枚新勋章目录。
 - v3.2.0 / 2026-08-31
@@ -39,6 +41,7 @@ class DashboardTests(unittest.TestCase):
             {
                 "subject": "行测",
                 "module": "资料分析",
+                "ability_id": "data",
                 "name": "基期量",
                 "status": "discovered",
                 "forms": {"base": True, "timed": False},
@@ -104,7 +107,9 @@ class DashboardTests(unittest.TestCase):
                 "seconds_per_question": 70,
                 "source": "测试练习",
                 "locked_before_start": True,
-                "ruleset_version": "1.6.0",
+                "ruleset_version": "1.7.0",
+                "record_type": "task_practice",
+                "counts_for_ability": True,
             }
         )
 
@@ -127,7 +132,10 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("技能总数", report)
         self.assertIn("全部 70", report)
         self.assertIn("待记录 69", report)
-        self.assertIn("全部 40", report)
+        self.assertIn("25枚，可累计", report)
+        self.assertIn("11项双战线", report)
+        self.assertIn("每条战线五档", report)
+        self.assertIn("medal-ladder", report)
         self.assertIn("数据口径", report)
         self.assertIn("练习战绩", report)
         self.assertIn("9/10", report)

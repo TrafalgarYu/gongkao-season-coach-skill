@@ -70,7 +70,7 @@ not_generated → offered → accepted → submitted → verified → reward_rea
   "attendance_gate": "有效出勤的最低证据",
   "performance_gate": "题量、正确率和实际用时要求",
   "reward_preview": "达标后可能变化的技能、错题、易错点、战绩或勋章",
-  "medal_targets": ["至少一枚尚未点亮的固定勋章ID"],
+  "medal_targets": ["本任务可能推进的成就ID"],
   "ranked": false,
   "rank_gate": null,
   "strong_pass_gate": null,
@@ -78,7 +78,7 @@ not_generated → offered → accepted → submitted → verified → reward_rea
 }
 ```
 
-规则 1.6 下，A、B、C 三个候选都必须推进至少一枚未点亮勋章。行测模块训练关联正确率与用时勋章，订正关联纠错勋章，模考关联战绩或赛季勋章。勋章全部点亮后才允许 `medal_targets` 为空。勋章关联不改变到期风险和提分价值的优先级。
+规则 1.7 下，候选任务优先关联它可能推进的实力、成长、生涯或赛季成就，但成就不是任务合法性的前提，也不得压过到期风险和提分价值。可重复成就即使已经点亮仍可继续作为目标；无法可靠预判时 `medal_targets` 可以为空。
 
 `open` 和 `evolve` 任务必须用 `skill_ids` 引用固定的 `skill-01` 至 `skill-70`。自然语言名称只用于展示；找不到对应 ID 时停止生成该候选，不得创建同义技能或自定义 ID。
 
@@ -174,11 +174,14 @@ candidate_score =
   "seconds_per_question": 80.0,
   "source": "题源",
   "locked_before_start": true,
-  "ruleset_version": "1.6.0"
+  "ruleset_version": "1.7.0",
+  "ability_id": "data",
+  "record_type": "task_practice",
+  "counts_for_ability": true
 }
 ```
 
-`accuracy_rate = correct_count / question_count × 100`，`seconds_per_question = duration_seconds / question_count`，均保留两位小数。只有作答前已锁定且单次不少于 10 题的记录可以点亮模块量化勋章；未锁定或不足 10 题的完整数据仍可作为普通练习战绩展示。同一任务、提交引用和模块只能有一条记录。
+`accuracy_rate = correct_count / question_count × 100`，`seconds_per_question = duration_seconds / question_count`，均保留两位小数。每日任务、自主练习和全卷模拟都按用户提交的真实记录结算，不要求用户额外说明场景。缺少实际用时的记录仍参与正确率战线，但不参与速度战线；订正后的复测单独标记，不混入长期实力。单次战绩要求至少 10 题且正确率、速度同时达标。同一任务、提交引用和能力项只能有一条记录。
 
 用“有效出勤数 ÷ 计划学习日数”作为节奏指标。effective 令 `momentum_level` 加 1，最高 3；missed 减 1，最低 0；planned_rest 不变。连续天数只作辅助展示，不因中断清空永久记录。
 

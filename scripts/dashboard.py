@@ -1,5 +1,9 @@
 """
 版本记录：
+- v5.0.0 / 2026-08-31
+  - 勋章墙拆为单次战绩、实力勋章、成长成就、生涯成就和赛季成就。
+  - 实力勋章按 11 项能力展示正确率或评分与速度五档路线。
+  - 错题本增加固定大类与题目筛选，练习记录增加排序。
 - v4.0.0 / 2026-08-31
   - 技能页取消“考场可用”等主观标签，改为直接展示实测数据和证据量。
   - 战绩页新增练习战绩表，勋章墙切换为 40 枚量化勋章目录。
@@ -40,10 +44,10 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
 
 try:
-    from .catalogs import default_medals
+    from .catalogs import ABILITY_SPECS, TIER_NAMES, default_medals
     from .state_store import StateError, read_current_state, resolve_state_path
 except ImportError:  # 直接运行 scripts/dashboard.py 时没有包上下文
-    from catalogs import default_medals
+    from catalogs import ABILITY_SPECS, TIER_NAMES, default_medals
     from state_store import StateError, read_current_state, resolve_state_path
 
 EASY_POINT_LABELS = {
@@ -152,7 +156,7 @@ def _render_skill(item: dict[str, Any], current_ids: set[str]) -> str:
 
 def _render_wrong(item: dict[str, Any]) -> str:
     return f"""
-    <article class="card">
+    <article class="card wrong-card" data-wrong-module="{_escape(item.get("module"))}" data-wrong-id="{_escape(item.get("wrong_id"))}">
       <p class="path">{_escape(item.get("date"))} · {_escape(item.get("subject"))} · {_escape(item.get("module"))}</p>
       <h3>{_escape(item.get("question_ref") or "未命名错题")}</h3>
       <p>我的答案：{_escape(_text(item.get("user_answer")))}</p>
@@ -209,13 +213,15 @@ def _render_assessment(item: dict[str, Any]) -> str:
 
 
 def _render_practice(item: dict[str, Any]) -> str:
-    purpose = "可判定勋章" if item.get("locked_before_start") else "仅记录"
+    purpose = "长期能力" if item.get("counts_for_ability", True) else "复测单列"
+    duration = f"{item.get('duration_seconds')} 秒" if item.get("duration_seconds") is not None else "未记录"
+    average = f"{item.get('seconds_per_question')} 秒" if item.get("seconds_per_question") is not None else "未记录"
     return f"""
-    <tr><td>{_escape(item.get("date"))}</td><td>{_escape(item.get("module"))}</td>
+    <tr data-date="{_escape(item.get('date'))}" data-accuracy="{_escape(item.get('accuracy_rate'))}" data-type="{_escape(item.get('record_type'))}"><td>{_escape(item.get("date"))}</td><td>{_escape(item.get("module"))}</td>
     <td>{_escape(item.get("correct_count"))}/{_escape(item.get("question_count"))}</td>
     <td>{_escape(_format_percent(item.get("accuracy_rate")))}</td>
-    <td>{_escape(item.get("duration_seconds"))} 秒</td>
-    <td>{_escape(item.get("seconds_per_question"))} 秒</td>
+    <td>{_escape(duration)}</td>
+    <td>{_escape(average)}</td>
     <td>{_escape(purpose)}</td></tr>"""
 
 
@@ -257,9 +263,40 @@ def _render_medal(item: dict[str, Any]) -> str:
       <h3>{_escape(item.get("name") or "未命名勋章")}</h3>
       <p>{_escape(_text(item.get("description")))}</p>
       <div class="medal-progress"><i style="width:{min(100, round(current / target * 100)) if target else 0}%"></i></div>
-      <p class="medal-count">{_escape(current)}/{_escape(target)} {_escape(item.get("progress_unit", "项"))}</p>
+      <p class="medal-count">{('★' + _escape(item.get('times_earned', 0)) + ' · ' if item.get('repeatable') else '')}{_escape(current)}/{_escape(target)} {_escape(item.get("progress_unit", "项"))}</p>
       <p class="muted">证据 {evidence_count} 条 · 点亮时间：{_escape(_text(item.get("unlocked_at"), "尚未点亮"))}</p>
     </article>"""
+
+
+def _render_strength_board(state: dict[str, Any], medals: list[dict[str, Any]]) -> str:
+    practices = [item for item in state.get("practice_records", []) if item.get("counts_for_ability", True)]
+    portfolio = [item for item in state.get("shenlun_portfolio", []) if item.get("score_source") != "ai_internal" and item.get("normalization_status") == "exact"]
+    cards: list[str] = []
+    for ability_id, name, group, _time_cuts, window in ABILITY_SPECS:
+        rows = [item for item in practices if item.get("ability_id") == ability_id]
+        questions = sum(int(item.get("question_count") or 0) for item in rows)
+        correct = sum(int(item.get("correct_count") or 0) for item in rows)
+        timed = [item for item in rows if item.get("duration_seconds") is not None]
+        timed_questions = sum(int(item.get("question_count") or 0) for item in timed)
+        if ability_id == "shenlun":
+            score_rows = [item for item in portfolio if isinstance(item.get("score_rate"), (int, float))]
+            metric_value = round(sum(item["score_rate"] for item in score_rows) / len(score_rows), 1) if score_rows else None
+            speed_rows = [item for item in portfolio if isinstance(item.get("time_minutes"), (int, float))]
+            speed_value = round(sum(item["time_minutes"] for item in speed_rows) / len(speed_rows), 1) if speed_rows else None
+            metric_name, unit = "评分", "分钟/题"
+        else:
+            metric_value = round(correct / questions * 100, 1) if questions else None
+            speed_value = round(sum(item["duration_seconds"] for item in timed) / timed_questions, 1) if timed_questions else None
+            metric_name, unit = "正确率", "秒/题"
+        tracks: list[str] = []
+        for metric, label, value, suffix, sample_count in (("score" if ability_id == "shenlun" else "accuracy", metric_name, metric_value, "%", len(score_rows) if ability_id == "shenlun" else questions), ("speed", "速度", speed_value, unit, len(speed_rows) if ability_id == "shenlun" else timed_questions)):
+            tiers = sorted([item for item in medals if item.get("ability_id") == ability_id and item.get("metric") == metric], key=lambda item: item.get("level", 0))
+            achieved = sum(item.get("status") == "unlocked" for item in tiers)
+            steps = "".join(f'<span class="medal-step level-{index} {"earned" if item.get("status") == "unlocked" else "next" if index == achieved + 1 else ""}"><b>{_escape(TIER_NAMES[index-1])}</b><small>{_escape(item.get("condition", {}).get("cut"))}{suffix}</small></span>' for index, item in enumerate(tiers, start=1))
+            sample_unit = "篇" if ability_id == "shenlun" else "题"
+            tracks.append(f'<div class="strength-track"><div class="track-head"><span>{label} · 当前 {_escape(value if value is not None else "暂无")}{suffix if value is not None else ""} · 样本 {sample_count}/{window}{sample_unit}</span><b>已达 {achieved}/5档 · 还剩 {5-achieved}档</b></div><div class="medal-ladder">{steps}</div></div>')
+        cards.append(f'<article class="card strength-card"><p class="path">{_escape(group)}</p><h3>{_escape(name)}</h3>{"".join(tracks)}</article>')
+    return "".join(cards)
 
 
 def _empty(message: str) -> str:
@@ -307,7 +344,15 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     fixed_medals = [
         item for item in medal_items if item.get("medal_id") in fixed_medal_ids
     ]
-    medals = "".join(_render_medal(item) for item in medal_items)
+    medal_groups = {
+        category: [item for item in medal_items if item.get("category") == category]
+        for category in ("单次战绩", "实力勋章", "成长成就", "生涯成就", "赛季成就")
+    }
+    single_medals = "".join(_render_medal(item) for item in medal_groups["单次战绩"])
+    strength_board = _render_strength_board(state, medal_groups["实力勋章"])
+    growth_medals = "".join(_render_medal(item) for item in medal_groups["成长成就"])
+    career_medals = "".join(_render_medal(item) for item in medal_groups["生涯成就"])
+    season_medals = "".join(_render_medal(item) for item in medal_groups["赛季成就"])
 
     standard = [item for item in catalog if item.get("tier") == "standard"]
     total = len(standard)
@@ -349,7 +394,8 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     .chips {{ display:flex; flex-wrap:wrap; gap:5px }} .chip {{ padding:3px 7px; border-radius:7px; font-size:12px }} .chip.done {{ color:#baf7cc; background:#143323 }} .chip.todo {{ color:#b5c0cd; background:#1a2736 }} .season-tag {{ position:absolute; right:0; bottom:0; padding:3px 9px; color:#08111d; background:var(--gold); font-size:11px; font-weight:700 }}
     details {{ padding:12px 16px; margin-bottom:16px }} summary {{ cursor:pointer; color:var(--gold); font-weight:700 }} .rank-overview {{ display:grid; grid-template-columns:1.2fr repeat(3,1fr); gap:14px; padding:18px }} .rank-now strong {{ display:block; color:var(--gold); font-size:28px }} .rank-stat span {{ display:block; color:var(--muted); font-size:12px }} .rank-stat strong {{ font-size:18px }}
     .rank {{ color:var(--gold); font-size:22px }} .medal {{ transition:border-color .2s,filter .2s }} .medal.locked {{ filter:grayscale(1); opacity:.58 }} .medal.unlocked {{ border-color:#78622f; background:linear-gradient(145deg,#182334,#322917) }} .medal-mark {{ width:64px; height:64px; display:grid; place-items:center; border:2px solid var(--gold); border-radius:50%; margin-bottom:12px; color:var(--gold); font-size:11px; font-weight:700 }} .medal-count {{ color:var(--gold); font-weight:700 }} .answer-text {{ padding:10px; background:#0b1624; border-radius:8px; white-space:pre-wrap }} .medal-progress {{ height:7px; background:#26364a; border-radius:99px; overflow:hidden }} .medal-progress i {{ display:block; height:100%; background:linear-gradient(90deg,var(--blue),var(--green)) }} .table-wrap {{ overflow:auto }} table {{ width:100%; border-collapse:collapse }} th,td {{ padding:10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap }}
-    .empty {{ grid-column:1/-1; padding:36px; text-align:center; color:var(--muted) }} .page[hidden],[hidden] {{ display:none!important }} @media(max-width:900px) {{ .summary {{ grid-template-columns:repeat(3,minmax(0,1fr)) }} .grid {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} }} @media(max-width:600px) {{ header {{ display:block }} .meta {{ max-width:100%; text-align:left;margin-top:10px }} .summary,.grid,.rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} }}
+    .achievement-tabs {{ display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:16px }} .achievement-tab {{ text-align:left }} .achievement-tab strong {{ display:block }} .achievement-page[hidden] {{ display:none!important }} .strength-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px }} .strength-track {{ margin-top:12px; padding:11px; background:#0b1624; border-left:3px solid var(--blue) }} .strength-track+ .strength-track {{ border-color:var(--green) }} .track-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; font-size:11px }} .track-head b {{ color:var(--gold) }} .medal-ladder {{ display:grid; grid-template-columns:repeat(5,1fr); gap:4px }} .medal-step {{ min-height:45px; padding:6px 2px; color:var(--muted); background:#1b2a3a; border:1px solid var(--line); text-align:center }} .medal-step b,.medal-step small {{ display:block }} .medal-step.level-1.earned {{ background:#70828c }} .medal-step.level-2.earned {{ background:#9b6a36 }} .medal-step.level-3.earned {{ background:#327ca1 }} .medal-step.level-4.earned {{ color:#111; background:#d6a322 }} .medal-step.level-5.earned {{ background:#a9423a }} .medal-step.next {{ color:var(--text); border:2px solid #d85b4e }} .wrong-controls,.record-controls {{ display:flex; gap:8px; align-items:center; margin-bottom:12px }} select {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624 }}
+    .empty {{ grid-column:1/-1; padding:36px; text-align:center; color:var(--muted) }} .page[hidden],[hidden] {{ display:none!important }} @media(max-width:900px) {{ .summary {{ grid-template-columns:repeat(3,minmax(0,1fr)) }} .grid,.strength-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .achievement-tabs {{ grid-template-columns:repeat(3,1fr) }} }} @media(max-width:600px) {{ header {{ display:block }} .meta {{ max-width:100%; text-align:left;margin-top:10px }} .summary,.grid,.rank-overview,.strength-grid,.achievement-tabs {{ grid-template-columns:1fr }} }}
   </style>
 </head><body><main>
   <header><div><p class="eyebrow">GONGKAO SEASON · 第 {_escape(season.get("number", 1))} 赛季</p><h1>备考总览</h1></div>
@@ -373,18 +419,18 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     <button class="tab-btn" data-tab="easy-points">易错点</button><button class="tab-btn" data-tab="records">战绩</button>
     <button class="tab-btn" data-tab="answers">申论答题册</button><button class="tab-btn" data-tab="medals">勋章墙</button>
   </nav>
-  <section class="page" data-page="skills"><details><summary>数据口径</summary><p>技能页只展示真实练习数据，不再使用“考场可用”等主观标签。模块量化勋章要求单次锁定练习至少 10 题，同时达到规定正确率和平均每题用时；缺少实际用时不判定。</p></details><div class="filters">
+  <section class="page" data-page="skills"><details><summary>数据口径</summary><p>技能页只展示真实练习数据，不再使用“考场可用”等主观标签。用户提交的日常练习、任务练习和全卷模拟均按原始题量、正确数与实际用时记录；缺少用时只参与正确率战线，不参与速度战线。</p></details><div class="filters">
     <button class="filter-btn active" data-filter="all">全部 {total}</button>
     <button class="filter-btn" data-filter="measured">有实测 {measured_skills}</button>
     <button class="filter-btn" data-filter="unmeasured">待记录 {total - measured_skills}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
     <input id="skill-search" type="search" placeholder="搜索科目、模块或技能"></div>
     <div class="grid" id="skill-grid">{skills or _empty("技能目录尚未建立。完成季前校准后再生成总览。")}</div></section>
-  <section class="page" data-page="wrongs" hidden><h2>错题本</h2><div class="grid">{wrongs or _empty("暂无错题记录。")}</div></section>
+  <section class="page" data-page="wrongs" hidden><h2>错题本</h2><p class="muted">一级分类固定为资料分析、数量关系、言语理解、判断推理、常识判断和申论。新题型只增加标签，不增加大类。</p><div class="wrong-controls"><select id="wrong-module"><option value="all">全部大类</option>{''.join(f'<option value="{_escape(name)}">{_escape(name)}</option>' for name in ('资料分析','数量关系','言语理解','判断推理','常识判断','申论'))}</select><select id="wrong-question"><option value="all">全部题目</option>{''.join(f'<option value="{_escape(item.get("wrong_id"))}" data-module="{_escape(item.get("module"))}">{_escape(item.get("question_ref") or item.get("wrong_id"))}</option>' for item in state.get('wrong_answers', []))}</select></div><div class="grid" id="wrong-grid">{wrongs or _empty("暂无错题记录。")}</div></section>
   <section class="page" data-page="easy-points" hidden><h2>易错点</h2><div class="grid">{easy_points or _empty("暂无易错点。")}</div></section>
-  <section class="page" data-page="records" hidden><h2>练习战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>模块</th><th>正确题数</th><th>正确率</th><th>总用时</th><th>平均每题</th><th>用途</th></tr></thead><tbody>{practices or '<tr><td colspan="7">暂无同时包含题量、正确数和实际用时的练习战绩。</td></tr>'}</tbody></table></div><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
+  <section class="page" data-page="records" hidden><h2>练习战绩</h2><div class="record-controls"><label for="record-sort">排序</label><select id="record-sort"><option value="newest">日期从新到旧</option><option value="oldest">日期从旧到新</option><option value="accuracy-desc">正确率从高到低</option><option value="accuracy-asc">正确率从低到高</option><option value="type">按记录类型</option></select></div><div class="table-wrap"><table><thead><tr><th>日期</th><th>模块</th><th>正确题数</th><th>正确率</th><th>总用时</th><th>平均每题</th><th>用途</th></tr></thead><tbody id="practice-body">{practices or '<tr><td colspan="7">暂无练习战绩。</td></tr>'}</tbody></table></div><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
     <h2>战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>科目</th><th>范围</th><th>成绩</th><th>来源</th><th>用途</th></tr></thead><tbody>{assessments or '<tr><td colspan="6">暂无战绩。</td></tr>'}</tbody></table></div></section>
   <section class="page" data-page="answers" hidden><h2>申论答题册</h2><div class="grid">{answers or _empty("暂无申论作答。")}</div></section>
-  <section class="page" data-page="medals" hidden><h2>勋章墙</h2><div class="filters"><button class="medal-filter active" data-medal-filter="all">全部 {len(medal_items)}</button><button class="medal-filter" data-medal-filter="locked">未点亮 {len(medal_items) - all_unlocked_medals}</button><button class="medal-filter" data-medal-filter="unlocked">已点亮 {all_unlocked_medals}</button></div><div class="grid">{medals}</div></section>
+  <section class="page" data-page="medals" hidden><h2>成就墙</h2><div class="achievement-tabs"><button class="achievement-tab active" data-achievement="single"><strong>单次战绩</strong>25枚，可累计</button><button class="achievement-tab" data-achievement="strength"><strong>实力勋章</strong>11项双战线</button><button class="achievement-tab" data-achievement="growth"><strong>成长成就</strong>奖励真实提升</button><button class="achievement-tab" data-achievement="career"><strong>生涯成就</strong>升星与里程碑</button><button class="achievement-tab" data-achievement="season"><strong>赛季成就</strong>本赛季进度</button></div><div class="achievement-page" data-achievement-page="single"><div class="grid">{single_medals}</div></div><div class="achievement-page" data-achievement-page="strength" hidden><p class="muted">每条战线五档。已获得档位永久保留，彩色代表已达成，红框标出下一档，灰色显示未来目标。</p><div class="strength-grid">{strength_board}</div></div><div class="achievement-page" data-achievement-page="growth" hidden><p class="muted">正确率提升5、10、15个百分点，速度提升10%、20%、30%。速度奖励要求正确率下降不超过5个百分点。</p><div class="grid">{growth_medals}</div></div><div class="achievement-page" data-achievement-page="career" hidden><div class="grid">{career_medals}</div></div><div class="achievement-page" data-achievement-page="season" hidden><div class="grid">{season_medals}</div></div></section>
 </main><script>
   const tabs=[...document.querySelectorAll('.tab-btn')]; const pages=[...document.querySelectorAll('.page')];
   function openTab(name){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.tab===name));pages.forEach(page=>page.hidden=page.dataset.page!==name);}}
@@ -394,8 +440,13 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
   function setSkillFilter(value){{filter=value;filters.forEach(x=>x.classList.toggle('active',x.dataset.filter===value));apply();}}
   filters.forEach(button=>button.addEventListener('click',()=>setSkillFilter(button.dataset.filter))); search.addEventListener('input',apply);
   document.querySelectorAll('.jump').forEach(button=>button.addEventListener('click',()=>{{openTab(button.dataset.tab);if(button.dataset.filter)setSkillFilter(button.dataset.filter);document.querySelector('.tabs').scrollIntoView({{behavior:'smooth'}});}}));
-  const medalCards=[...document.querySelectorAll('.medal')]; const medalFilters=[...document.querySelectorAll('.medal-filter')];
-  medalFilters.forEach(button=>button.addEventListener('click',()=>{{const value=button.dataset.medalFilter;medalFilters.forEach(x=>x.classList.toggle('active',x===button));medalCards.forEach(card=>card.hidden=value!=='all'&&card.dataset.medalStatus!==value);}}));
+  const achievementTabs=[...document.querySelectorAll('.achievement-tab')]; const achievementPages=[...document.querySelectorAll('.achievement-page')];
+  achievementTabs.forEach(button=>button.addEventListener('click',()=>{{achievementTabs.forEach(x=>x.classList.toggle('active',x===button));achievementPages.forEach(page=>page.hidden=page.dataset.achievementPage!==button.dataset.achievement);}}));
+  const wrongModule=document.querySelector('#wrong-module'); const wrongQuestion=document.querySelector('#wrong-question'); const wrongCards=[...document.querySelectorAll('.wrong-card')];
+  function applyWrongFilter(){{const module=wrongModule.value;const question=wrongQuestion.value;wrongCards.forEach(card=>card.hidden=!(module==='all'||card.dataset.wrongModule===module)||!(question==='all'||card.dataset.wrongId===question));[...wrongQuestion.options].forEach((option,index)=>{{if(index)option.hidden=module!=='all'&&option.dataset.module!==module;}});}}
+  wrongModule.addEventListener('change',()=>{{wrongQuestion.value='all';applyWrongFilter();}}); wrongQuestion.addEventListener('change',applyWrongFilter);
+  const recordSort=document.querySelector('#record-sort'); const practiceBody=document.querySelector('#practice-body');
+  recordSort.addEventListener('change',()=>{{const rows=[...practiceBody.querySelectorAll('tr[data-date]')];rows.sort((a,b)=>{{if(recordSort.value==='oldest')return a.dataset.date.localeCompare(b.dataset.date);if(recordSort.value==='accuracy-desc')return Number(b.dataset.accuracy)-Number(a.dataset.accuracy);if(recordSort.value==='accuracy-asc')return Number(a.dataset.accuracy)-Number(b.dataset.accuracy);if(recordSort.value==='type')return a.dataset.type.localeCompare(b.dataset.type);return b.dataset.date.localeCompare(a.dataset.date);}});rows.forEach(row=>practiceBody.appendChild(row));}});
   function requestRefresh(){{window.location.search='refresh=1';}}
   if(new URLSearchParams(window.location.search).get('refresh')==='1')history.replaceState({{}},'',window.location.pathname);
   document.querySelector('#manual-refresh').addEventListener('click',requestRefresh);

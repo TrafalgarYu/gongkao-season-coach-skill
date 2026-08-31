@@ -1,5 +1,7 @@
 """
 版本记录：
+- v1.7.0 / 2026-08-31
+  - 覆盖五类成就、分离正确率与用时、11项能力归类和1.6历史迁移。
 - v1.6.0 / 2026-08-31
   - 覆盖 40 枚新勋章、练习战绩校验和旧记录严格提取。
   - 验证重复旧勋章被替换，缺少实际用时的历史证据不补发新勋章。
@@ -42,8 +44,8 @@ class StateStoreTests(unittest.TestCase):
 
         state_store.validate_state(state)
 
-        self.assertEqual(state["schema_version"], "1.6")
-        self.assertEqual(state["engine"]["ruleset_version"], "1.6.0")
+        self.assertEqual(state["schema_version"], "1.7")
+        self.assertEqual(state["engine"]["ruleset_version"], "1.7.0")
         self.assertEqual(state["goal_contract"]["module_targets"], [])
         self.assertEqual(state["goal_contract"]["subject_targets"], [])
         self.assertEqual(state["wrong_answers"], [])
@@ -51,7 +53,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(state["subject_rankings"], [])
         self.assertEqual(len(state["catalog"]), 70)
         self.assertEqual(state["practice_records"], [])
-        self.assertEqual(len(state["medals"]), 40)
+        self.assertEqual(len(state["medals"]), 234)
         self.assertTrue(all(item["status"] == "locked" for item in state["medals"]))
 
     def test_locked_practice_unlocks_each_reached_module_tier(self) -> None:
@@ -66,6 +68,7 @@ class StateStoreTests(unittest.TestCase):
                 "date": "2026-08-31",
                 "subject": "行测",
                 "module": "资料分析",
+                "ability_id": "data",
                 "question_count": 10,
                 "correct_count": 9,
                 "accuracy_rate": 90,
@@ -73,7 +76,9 @@ class StateStoreTests(unittest.TestCase):
                 "seconds_per_question": 70,
                 "source": "锁定练习",
                 "locked_before_start": True,
-                "ruleset_version": "1.6.0",
+                "ruleset_version": "1.7.0",
+                "record_type": "task_practice",
+                "counts_for_ability": True,
             }
         )
 
@@ -104,6 +109,7 @@ class StateStoreTests(unittest.TestCase):
                 "date": "2026-08-31",
                 "subject": "行测",
                 "module": "判断推理",
+                "ability_id": "reasoning-logic",
                 "question_count": 10,
                 "correct_count": 8,
                 "accuracy_rate": 90,
@@ -111,12 +117,54 @@ class StateStoreTests(unittest.TestCase):
                 "seconds_per_question": 80,
                 "source": "锁定练习",
                 "locked_before_start": True,
-                "ruleset_version": "1.6.0",
+                "ruleset_version": "1.7.0",
+                "record_type": "task_practice",
+                "counts_for_ability": True,
             }
         )
 
         with self.assertRaisesRegex(state_store.StateError, "正确率与题量不一致"):
             state_store.validate_state(state)
+
+    def test_growth_uses_non_overlapping_windows_and_can_repeat(self) -> None:
+        state = state_store.default_state(TIMESTAMP)
+        accuracies = (50, 50, 65, 65, 55, 55, 70, 70)
+        for index, accuracy in enumerate(accuracies, start=1):
+            state["practice_records"].append(
+                {
+                    "practice_id": f"practice-growth-{index}",
+                    "campaign_id": None,
+                    "season_id": None,
+                    "task_id": None,
+                    "submission_ref": f"submission-growth-{index}",
+                    "date": f"2026-08-{index:02d}",
+                    "subject": "行测",
+                    "module": "言语理解",
+                    "ability_id": "verbal-reading",
+                    "question_count": 20,
+                    "correct_count": accuracy // 5,
+                    "accuracy_rate": accuracy,
+                    "duration_seconds": None,
+                    "seconds_per_question": None,
+                    "source": "自主练习",
+                    "locked_before_start": False,
+                    "ruleset_version": "1.7.0",
+                    "record_type": "free_practice",
+                    "counts_for_ability": True,
+                }
+            )
+
+        state_store.refresh_medals(state, TIMESTAMP)
+        state_store.validate_state(state)
+
+        growth = {
+            item["medal_id"]: item
+            for item in state["medals"]
+            if item["medal_id"].startswith("growth-verbal-reading-accuracy")
+        }
+        self.assertEqual(growth["growth-verbal-reading-accuracy-1"]["times_earned"], 2)
+        self.assertEqual(growth["growth-verbal-reading-accuracy-2"]["times_earned"], 2)
+        self.assertEqual(growth["growth-verbal-reading-accuracy-3"]["times_earned"], 2)
 
     def test_v15_migration_extracts_only_complete_practice_metrics(self) -> None:
         old = state_store.default_state(TIMESTAMP)
@@ -186,7 +234,7 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
         state_store.validate_state(migrated)
 
-        self.assertEqual(len(migrated["practice_records"]), 1)
+        self.assertEqual(len(migrated["practice_records"]), 2)
         self.assertNotIn(
             "medal-reasoning-first",
             {item["medal_id"] for item in migrated["medals"]},
@@ -198,8 +246,9 @@ class StateStoreTests(unittest.TestCase):
         }
         self.assertTrue({"medal-data-starter", "medal-data-surge"}.issubset(unlocked))
         report = migrated["engine"]["migration_history"][-1]["practice_records"]
-        self.assertEqual(report["practice_records_extracted"], 1)
+        self.assertEqual(report["practice_records_extracted"], 2)
         self.assertEqual(report["skipped_missing_duration_seconds"], 1)
+        self.assertEqual(report["accuracy_only_records"], 1)
 
     def test_v12_migration_adds_progression_collections(self) -> None:
         old = state_store.default_state(TIMESTAMP)
@@ -214,9 +263,9 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
 
         state_store.validate_state(migrated)
-        self.assertEqual(migrated["schema_version"], "1.6")
-        self.assertEqual(migrated["engine"]["ruleset_version"], "1.6.0")
-        self.assertEqual(migrated["season"]["ruleset_version"], "1.6.0")
+        self.assertEqual(migrated["schema_version"], "1.7")
+        self.assertEqual(migrated["engine"]["ruleset_version"], "1.7.0")
+        self.assertEqual(migrated["season"]["ruleset_version"], "1.7.0")
         self.assertEqual(migrated["wrong_answers"], [])
 
     def test_rank_lines_must_be_ordered(self) -> None:
@@ -383,7 +432,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertTrue(migrated["campaign"]["campaign_id"])
             self.assertTrue(migrated["season"]["season_id"])
             self.assertTrue(migrated["attendance"]["records"][0]["counts_as_effective"])
-            self.assertEqual(migrated["season"]["ruleset_version"], "1.6.0")
+            self.assertEqual(migrated["season"]["ruleset_version"], "1.7.0")
 
     def test_actual_v1_fixture_migrates_without_rejudging(self) -> None:
         old = json.loads((FIXTURES / "state-v1.0.json").read_text(encoding="utf-8"))
@@ -391,10 +440,10 @@ class StateStoreTests(unittest.TestCase):
         migrated = state_store.migrate_state(old, TIMESTAMP)
         state_store.validate_state(migrated)
 
-        self.assertEqual(migrated["schema_version"], "1.6")
+        self.assertEqual(migrated["schema_version"], "1.7")
         self.assertEqual(migrated["season"]["status"], "preseason")
         self.assertEqual(migrated["season"]["phase"], "calibration")
-        self.assertEqual(migrated["season"]["ruleset_version"], "1.6.0")
+        self.assertEqual(migrated["season"]["ruleset_version"], "1.7.0")
         self.assertEqual(
             migrated["engine"]["migration_history"][0]["previous_season_ruleset"],
             "legacy-1.0",
@@ -421,7 +470,7 @@ class StateStoreTests(unittest.TestCase):
             "rank_delta": 1,
             "score_source": "ai_internal",
             "evidence_refs": [],
-            "ruleset_version": "1.6.0",
+            "ruleset_version": "1.7.0",
         }
         state["assessments"].append(assessment)
 
@@ -589,7 +638,7 @@ class StateStoreTests(unittest.TestCase):
             }
         ]
         four_sims = next(
-            item for item in state["medals"] if item["medal_id"] == "medal-four-sims"
+            item for item in state["medals"] if item["medal_id"] == "season-mocks"
         )
         four_sims["progress_current"] = 3
 
@@ -610,7 +659,7 @@ class StateStoreTests(unittest.TestCase):
             next(
                 item
                 for item in next_state["medals"]
-                if item["medal_id"] == "medal-four-sims"
+                if item["medal_id"] == "season-mocks"
             )["progress_current"],
             0,
         )
@@ -618,7 +667,7 @@ class StateStoreTests(unittest.TestCase):
             next(
                 item
                 for item in next_state["medals"]
-                if item["medal_id"] == "medal-first-result"
+                if item["medal_id"] == "career-first-result"
             )["progress_current"],
             1,
         )
@@ -626,7 +675,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertEqual(next_state["module_rankings"], [])
         self.assertEqual(next_state["subject_rankings"], [])
 
-    def test_new_task_options_must_target_locked_medal(self) -> None:
+    def test_new_task_medal_targets_are_optional_but_must_be_known(self) -> None:
         state = state_store.default_state(TIMESTAMP)
         state["daily_quest"].update(
             {
@@ -635,11 +684,11 @@ class StateStoreTests(unittest.TestCase):
                 "options": [{"offer_id": "offer-1", "task_id": "task-1"}],
             }
         )
-        with self.assertRaisesRegex(state_store.StateError, "未点亮勋章"):
-            state_store.validate_state(state)
-
-        state["daily_quest"]["options"][0]["medal_targets"] = ["medal-first-result"]
         state_store.validate_state(state)
+
+        state["daily_quest"]["options"][0]["medal_targets"] = ["unknown-medal"]
+        with self.assertRaisesRegex(state_store.StateError, "medal_targets 无效"):
+            state_store.validate_state(state)
 
     def test_v13_migration_replaces_legacy_medal_and_keeps_open_task(self) -> None:
         old = state_store.default_state(TIMESTAMP)
@@ -671,7 +720,7 @@ class StateStoreTests(unittest.TestCase):
         self.assertNotIn(
             "legacy-medal", {item["medal_id"] for item in migrated["medals"]}
         )
-        self.assertEqual(len(migrated["medals"]), 40)
+        self.assertEqual(len(migrated["medals"]), 234)
         self.assertEqual(
             migrated["daily_quest"]["options"][0]["ruleset_version"],
             "1.3.0",
@@ -894,7 +943,7 @@ class StateStoreTests(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "dry-run")
-            self.assertEqual(result["schema_version"], "1.6")
+            self.assertEqual(result["schema_version"], "1.7")
             self.assertEqual(result["counts"]["skills"], 70)
             self.assertEqual(state_path.read_text(encoding="utf-8"), original)
             self.assertFalse((state_path.parent / "state.backup.json").exists())
