@@ -4,6 +4,7 @@
   - 勋章墙拆为单次战绩、实力勋章、成长成就、生涯成就和赛季成就。
   - 实力勋章按 11 项能力展示正确率或评分与速度五档路线。
   - 错题本增加固定大类与题目筛选，练习记录增加排序。
+  - 把已验收的卷宗式八栏目布局落入正式生成器，恢复今日任务和能力分析入口。
 - v4.0.0 / 2026-08-31
   - 技能页取消“考场可用”等主观标签，改为直接展示实测数据和证据量。
   - 战绩页新增练习战绩表，勋章墙切换为 40 枚量化勋章目录。
@@ -303,6 +304,13 @@ def _empty(message: str) -> str:
     return f'<div class="empty">{_escape(message)}</div>'
 
 
+def _format_seconds(value: int | float | None) -> str:
+    if not isinstance(value, (int, float)):
+        return "未记录"
+    minutes, seconds = divmod(round(value), 60)
+    return f"{minutes}:{seconds:02d}"
+
+
 def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     catalog = [item for item in state.get("catalog", []) if isinstance(item, dict)]
     catalog.sort(
@@ -359,7 +367,6 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     measured_skills = sum(bool(item.get("recent_performance")) for item in standard)
     measured_modules = len({item.get("module") for item in practice_records})
     unlocked_medals = sum(item.get("status") == "unlocked" for item in fixed_medals)
-    all_unlocked_medals = sum(item.get("status") == "unlocked" for item in medal_items)
     open_easy_points = sum(
         item.get("status") != "sealed" for item in state.get("error_hunts", [])
     )
@@ -374,6 +381,101 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     placement = season.get("placement_progress", {})
     updated_at = state.get("engine", {}).get("updated_at") or "尚未记录"
     generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    daily = state.get("daily_quest", {})
+    accepted_id = daily.get("accepted_task_id")
+    accepted = next(
+        (
+            item
+            for item in daily.get("options", [])
+            if item.get("task_id") == accepted_id
+        ),
+        (daily.get("locked_conditions") or {}).get("template", {}),
+    )
+    accepted_skills = [
+        item.get("name")
+        for item in catalog
+        if item.get("id") in set(accepted.get("skill_ids", []))
+    ]
+    focus_module = accepted.get("module") or "等待生成任务"
+    focus_name = accepted_skills[0] if accepted_skills else focus_module
+    task_title = (
+        f"补齐{focus_module}核心技能“{focus_name}”"
+        if accepted_id
+        else "今天还没有接取主任务"
+    )
+    task_practices = [
+        item for item in practice_records if item.get("task_id") == accepted_id
+    ]
+    task_practice = task_practices[-1] if task_practices else None
+    if task_practice:
+        task_result = (
+            str(task_practice["question_count"]),
+            str(task_practice["correct_count"]),
+            f'{task_practice["accuracy_rate"]:g}%',
+            _format_seconds(task_practice.get("duration_seconds")),
+        )
+    else:
+        task_result = ("—", "—", "—", "—")
+    status_labels = {
+        "not_generated": "待生成",
+        "offered": "待选择",
+        "accepted": "进行中",
+        "submitted": "待验收",
+        "verified": "已验收",
+        "reward_ready": "已完成待查看结算",
+        "revealed": "已结算",
+    }
+    task_status = status_labels.get(daily.get("status"), str(daily.get("status") or "待生成"))
+    verification_note = (daily.get("verification") or {}).get("note")
+    evidence_items = [
+        "已保存题量、正确数与用户提供的实际用时",
+        f"本次记录已归入{task_practice.get('ability_id')}能力项" if task_practice else "提交后将自动分类进入历史记录",
+    ]
+    if verification_note:
+        evidence_items.append(str(verification_note))
+    evidence_html = "".join(f"<li>{_escape(item)}</li>" for item in evidence_items)
+
+    ability_samples: list[tuple[str, str, int, int, float | None]] = []
+    for ability_id, ability_name, _group, _cuts, window in ABILITY_SPECS:
+        if ability_id == "shenlun":
+            sample = len(
+                [
+                    item
+                    for item in state.get("shenlun_portfolio", [])
+                    if item.get("score_source") != "ai_internal"
+                    and item.get("normalization_status") == "exact"
+                ]
+            )
+            value = None
+        else:
+            rows = [
+                item
+                for item in practice_records
+                if item.get("counts_for_ability", True)
+                and item.get("ability_id") == ability_id
+            ]
+            sample = sum(int(item.get("question_count") or 0) for item in rows)
+            correct = sum(int(item.get("correct_count") or 0) for item in rows)
+            value = round(correct / sample * 100, 1) if sample else None
+        ability_samples.append((ability_id, ability_name, sample, window, value))
+    sampled_abilities = sum(sample > 0 for _id, _name, sample, _window, _value in ability_samples)
+    timed_abilities = len(
+        {
+            item.get("ability_id")
+            for item in practice_records
+            if item.get("counts_for_ability", True)
+            and isinstance(item.get("duration_seconds"), (int, float))
+        }
+    )
+    pending_samples = [item for item in ability_samples if 0 < item[2] < item[3]]
+    next_ability = min(pending_samples, key=lambda item: item[3] - item[2]) if pending_samples else ability_samples[0]
+    next_count = max(1, next_ability[3] - next_ability[2])
+    next_title = f"{next_ability[1]}再补一组"
+    next_reason = f"目前长期样本 {next_ability[2]}/{next_ability[3]}{'篇' if next_ability[0] == 'shenlun' else '题'}，补齐后才能按历史数据授予实力档位。"
+    attendance_records = state.get("attendance", {}).get("records", [])
+    planned_days = len([item for item in attendance_records if item.get("status") != "planned_rest"])
+    effective_days = len([item for item in attendance_records if item.get("counts_as_effective")])
 
     return f"""<!doctype html>
 <html lang="zh-CN"><head>
@@ -397,9 +499,33 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     .achievement-tabs {{ display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin-bottom:16px }} .achievement-tab {{ text-align:left }} .achievement-tab strong {{ display:block }} .achievement-page[hidden] {{ display:none!important }} .strength-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px }} .strength-track {{ margin-top:12px; padding:11px; background:#0b1624; border-left:3px solid var(--blue) }} .strength-track+ .strength-track {{ border-color:var(--green) }} .track-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; font-size:11px }} .track-head b {{ color:var(--gold) }} .medal-ladder {{ display:grid; grid-template-columns:repeat(5,1fr); gap:4px }} .medal-step {{ min-height:45px; padding:6px 2px; color:var(--muted); background:#1b2a3a; border:1px solid var(--line); text-align:center }} .medal-step b,.medal-step small {{ display:block }} .medal-step.level-1.earned {{ background:#70828c }} .medal-step.level-2.earned {{ background:#9b6a36 }} .medal-step.level-3.earned {{ background:#327ca1 }} .medal-step.level-4.earned {{ color:#111; background:#d6a322 }} .medal-step.level-5.earned {{ background:#a9423a }} .medal-step.next {{ color:var(--text); border:2px solid #d85b4e }} .wrong-controls,.record-controls {{ display:flex; gap:8px; align-items:center; margin-bottom:12px }} select {{ border:1px solid var(--line); border-radius:9px; padding:8px 11px; color:var(--text); background:#0b1624 }}
     .empty {{ grid-column:1/-1; padding:36px; text-align:center; color:var(--muted) }} .page[hidden],[hidden] {{ display:none!important }} @media(max-width:900px) {{ .summary {{ grid-template-columns:repeat(3,minmax(0,1fr)) }} .grid,.strength-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .rank-overview {{ grid-template-columns:repeat(2,minmax(0,1fr)) }} .achievement-tabs {{ grid-template-columns:repeat(3,1fr) }} }} @media(max-width:600px) {{ header {{ display:block }} .meta {{ max-width:100%; text-align:left;margin-top:10px }} .summary,.grid,.rank-overview,.strength-grid,.achievement-tabs {{ grid-template-columns:1fr }} }}
   </style>
+  <style>
+    :root {{ color-scheme:light; --bg:#e9eef1; --panel:#fbfcfd; --line:#ccd7dc; --text:#172c3b; --muted:#6d7e88; --gold:#a56c18; --blue:#226e96; --green:#2b745d; --red:#c34b3f; --paper-2:#f2f5f6 }}
+    body {{ background:linear-gradient(rgba(41,69,87,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(41,69,87,.035) 1px,transparent 1px),var(--bg); background-size:24px 24px; font-family:"Microsoft YaHei","PingFang SC",sans-serif }}
+    main {{ display:grid; grid-template-columns:230px minmax(0,1fr); width:min(1500px,calc(100% - 28px)); min-height:calc(100vh - 28px); margin:14px auto; padding:0; background:#fbfcfd; border:1px solid var(--line); box-shadow:0 13px 32px rgba(27,53,69,.085) }}
+    main>header,main>.page {{ grid-column:2 }} main>.summary-label,main>.summary {{ display:none }}
+    header {{ min-height:74px; padding:17px 30px; align-items:center; background:rgba(251,252,253,.96); border-bottom:1px solid var(--line) }}
+    header h1 {{ font-size:17px }} header .eyebrow {{ color:var(--muted) }} .meta {{ color:var(--muted) }} .manual-refresh {{ color:#fff; background:var(--blue); border:0 }}
+    .tabs {{ grid-column:1; grid-row:1/span 20; position:sticky; top:14px; align-self:start; display:grid; align-content:start; gap:4px; height:calc(100vh - 28px); margin:0; padding:28px 18px 20px; color:#f3f7f9; background:#172c3b; border:0; border-radius:0; overflow:auto }}
+    .rail-brand {{ padding:0 9px 25px; margin-bottom:18px; border-bottom:1px solid rgba(255,255,255,.13) }} .rail-brand small {{ color:#8fb7cc; font:700 10px/1.2 Consolas,monospace; letter-spacing:.16em }} .rail-brand strong {{ display:block; margin:9px 0 5px; color:#fff; font:700 27px/1.1 "STZhongsong","SimSun",serif }} .rail-brand span {{ color:#9fb0ba; font-size:12px }}
+    .tab-btn {{ display:grid; grid-template-columns:28px 1fr auto; align-items:center; gap:9px; width:100%; padding:11px 10px; color:#b7c5cc; text-align:left; background:transparent; border:0; border-radius:6px }} .tab-btn>span:first-child {{ color:#7693a3; font:700 11px/1 Consolas,monospace }} .tab-btn b {{ padding:2px 6px; color:#9fb0ba; background:rgba(255,255,255,.07); border-radius:99px; font:600 10px/1.4 Consolas,monospace }} .tab-btn.active {{ color:#fff; background:rgba(255,255,255,.11) }}
+    .page {{ min-width:0; padding:28px 30px 56px }} .page-head {{ display:flex; justify-content:space-between; gap:24px; align-items:end; margin-bottom:20px }} .page-head .eyebrow {{ margin:0 0 6px; color:var(--blue); font:700 11px/1.2 Consolas,monospace; letter-spacing:.14em }} .page-head h2 {{ margin:0; font:700 clamp(29px,3vw,42px)/1.08 "STZhongsong","SimSun",serif }} .page-head>p {{ max-width:620px; margin:0; color:var(--muted); line-height:1.65; text-align:right }}
+    .metric,.card,.filters,.table-wrap,.empty,.rank-overview,details {{ background:var(--panel); border:1px solid var(--line); border-radius:4px 4px 14px 4px; box-shadow:0 8px 22px rgba(27,53,69,.06) }}
+    button,input,select {{ color:var(--text); background:var(--panel); border-color:var(--line) }} button.active {{ color:#fff; background:#294557; border-color:#294557 }}
+    .grid {{ grid-template-columns:repeat(3,minmax(0,1fr)) }} .card {{ color:var(--text) }} .skill-performance,.strength-track,.answer-text {{ background:var(--paper-2) }} .chip.done {{ color:var(--green); background:#dcece6 }} .chip.todo,.status {{ color:var(--muted); background:#e5eaec }} .status-measured {{ color:var(--green) }}
+    .today-grid {{ display:grid; grid-template-columns:minmax(0,1.35fr) minmax(290px,.65fr); gap:15px }} .mission {{ overflow:hidden }} .mission-head {{ padding:28px; color:#fff; background:#294557 }} .mission-head .label {{ color:#97c4da; font:700 11px/1 Consolas,monospace; letter-spacing:.14em }} .mission-head h3 {{ margin:10px 0 12px; font:700 28px/1.2 "STZhongsong","SimSun",serif }} .mission-head p {{ margin:0; color:#c5d3da; line-height:1.7 }} .mission-body,.next-action,.loop {{ padding:22px }} .mission-result {{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px }} .mission-result div {{ padding:12px; background:var(--paper-2); border-left:3px solid var(--blue) }} .mission-result small {{ display:block; color:var(--muted); font-size:11px }} .mission-result strong {{ display:block; margin-top:4px; font:700 20px/1.1 Consolas,monospace }} .evidence-list {{ margin:17px 0 0; padding-left:20px; color:var(--muted); line-height:1.8 }}
+    .next-action .stamp {{ display:grid; place-items:center; width:58px; height:58px; color:var(--red); border:2px solid var(--red); border-radius:50%; font:800 11px/1.1 Consolas,monospace; transform:rotate(-7deg) }} .next-action h3 {{ margin:19px 0 8px; font-size:22px }} .next-action p {{ color:var(--muted) }} .next-action .why {{ margin-top:16px; padding:12px; color:#fff; background:#294557; border-radius:3px 3px 11px 3px; font-size:13px }}
+    .loop {{ margin-top:15px }} .loop-track {{ display:grid; grid-template-columns:repeat(6,1fr); gap:8px }} .loop-step {{ min-height:100px; padding:13px; background:var(--paper-2); border-top:4px solid var(--line) }} .loop-step.done {{ border-color:var(--green) }} .loop-step.current {{ border-color:var(--red); background:#f5dfdc }} .loop-step small,.loop-step p {{ color:var(--muted); font-size:11px }} .loop-step strong {{ display:block; margin:10px 0 5px }}
+    .ability-summary {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:14px }} .summary-card {{ padding:16px 18px }} .summary-card small {{ color:var(--muted) }} .summary-card strong {{ display:block; margin-top:7px; font:700 25px/1 Consolas,monospace }}
+    .strength-track {{ border-left:3px solid var(--blue) }} .strength-track+.strength-track {{ border-color:var(--green) }} .medal-step {{ color:#87949b; background:#e3e8ea; border-color:#d4dde1 }} .medal-step.level-1.earned {{ background:#70828c }} .medal-step.level-2.earned {{ background:#9b6a36 }} .medal-step.level-3.earned {{ background:#327ca1 }} .medal-step.level-4.earned {{ color:#fff; background:#b27b14 }} .medal-step.level-5.earned {{ background:#a9423a }} .medal-step.next {{ color:var(--text); background:#fff; border:2px solid var(--red) }} .track-head b,.medal-count {{ color:var(--red) }}
+    .achievement-tab.active {{ color:#c7d5dc; background:#294557; border-color:#294557 }} .medal.locked {{ opacity:.62 }} .medal.unlocked {{ border-color:#a7cdbf; background:#dcece6 }} .medal-mark {{ color:var(--blue); border-color:var(--blue) }} .medal-progress {{ background:#e0e6e9 }}
+    .wrong-layout {{ display:grid; grid-template-columns:1fr 1fr; gap:14px }} .section-title {{ display:flex; justify-content:space-between; align-items:center; margin:18px 0 10px }} .record-controls,.wrong-controls {{ padding:12px 14px; background:var(--panel); border:1px solid var(--line); border-radius:4px }}
+    @media(max-width:900px) {{ main {{ display:block; width:calc(100% - 16px); margin:8px auto }} .tabs {{ position:sticky; top:0; z-index:8; display:flex; height:auto; padding:12px; overflow-x:auto }} .rail-brand,.tab-btn>span:first-child,.tab-btn b {{ display:none }} .tab-btn {{ display:block; flex:0 0 auto; width:auto; white-space:nowrap }} header {{ display:flex }} .page {{ padding:22px 16px 42px }} .today-grid,.wrong-layout {{ grid-template-columns:1fr }} .loop-track {{ grid-template-columns:repeat(3,1fr) }} }}
+    @media(max-width:600px) {{ .page-head {{ display:block }} .page-head>p {{ margin-top:8px; text-align:left }} .mission-result,.ability-summary,.grid,.strength-grid,.achievement-tabs {{ grid-template-columns:1fr }} .loop-track {{ grid-template-columns:repeat(2,1fr) }} }}
+  </style>
 </head><body><main>
-  <header><div><p class="eyebrow">GONGKAO SEASON · 第 {_escape(season.get("number", 1))} 赛季</p><h1>备考总览</h1></div>
-    <div class="meta">数据更新：{_escape(updated_at)}<br>页面生成：{_escape(generated_at)}<br>每天 08:00 自动刷新<br><button id="manual-refresh" class="manual-refresh" type="button">手动刷新</button><br>数据文件：{_escape(source_path)}</div></header>
+  <header><div><p class="eyebrow">今天的训练重点</p><h1>{_escape(focus_module)} · {_escape(focus_name)}</h1></div>
+    <div class="meta">计划出勤 {effective_days}/{planned_days} · 练习主样本 {sum(item[2] for item in ability_samples if item[0] != 'shenlun')}题 · 错题 {len(state.get("wrong_answers", []))}<br>数据更新：{_escape(updated_at)} · 每天 08:00 自动刷新<br><button id="manual-refresh" class="manual-refresh" type="button">手动刷新</button><br>数据文件：{_escape(source_path)} · 页面生成：{_escape(generated_at)}</div></header>
   <p class="summary-label">技能全貌</p><section class="summary">
     <button class="metric jump" data-tab="skills" data-filter="all"><strong>{total}</strong><span>技能总数</span></button>
     <button class="metric jump" data-tab="skills" data-filter="measured"><strong>{measured_skills}</strong><span>已有实测技能</span></button>
@@ -415,22 +541,30 @@ def render_html(state: dict[str, Any], *, source_path: Path) -> str:
     <button class="metric jump" data-tab="records"><strong>{_escape(rank)} {"★" * stars}</strong><span>本赛季段位 · 调整点 {adjustment}/{adjustment_cap}</span></button>
   </section>
   <nav class="tabs">
-    <button class="tab-btn active" data-tab="skills">技能总览</button><button class="tab-btn" data-tab="wrongs">错题本</button>
-    <button class="tab-btn" data-tab="easy-points">易错点</button><button class="tab-btn" data-tab="records">战绩</button>
-    <button class="tab-btn" data-tab="answers">申论答题册</button><button class="tab-btn" data-tab="medals">勋章墙</button>
+    <div class="rail-brand"><small>GONGKAO DOSSIER</small><strong>备考卷宗</strong><span>第 {_escape(season.get("number", 1))} 赛季 · {_escape(season.get("theme") or season.get("phase") or "校准期")}</span></div>
+    <button class="tab-btn active" data-tab="today"><span>01</span>今日任务<b>{_escape(task_status)}</b></button>
+    <button class="tab-btn" data-tab="ability"><span>02</span>能力分析<b>{sampled_abilities}有样本</b></button>
+    <button class="tab-btn" data-tab="skills"><span>03</span>技能地图<b>{measured_skills}/{total}</b></button>
+    <button class="tab-btn" data-tab="records"><span>04</span>练习记录<b>{len(practice_records)}</b></button>
+    <button class="tab-btn" data-tab="wrongs"><span>05</span>错题本<b>{len(state.get("wrong_answers", []))}</b></button>
+    <button class="tab-btn" data-tab="answers"><span>06</span>申论答题本<b>{len(state.get("shenlun_portfolio", []))}</b></button>
+    <button class="tab-btn" data-tab="rank"><span>07</span>战绩段位<b>{_escape(rank)}</b></button>
+    <button class="tab-btn" data-tab="medals"><span>08</span>成就墙<b>{unlocked_medals}</b></button>
   </nav>
-  <section class="page" data-page="skills"><details><summary>数据口径</summary><p>技能页只展示真实练习数据，不再使用“考场可用”等主观标签。用户提交的日常练习、任务练习和全卷模拟均按原始题量、正确数与实际用时记录；缺少用时只参与正确率战线，不参与速度战线。</p></details><div class="filters">
+  <section class="page" data-page="today"><div class="page-head"><div><p class="eyebrow">TODAY / 行动入口</p><h2>今天只管把下一步做对</h2></div><p>系统规划一个主任务，自主练习不限量。提交后统一进入记录、诊断、纠错和成就结算。</p></div><div class="today-grid"><article class="card mission"><div class="mission-head"><span class="label">今日主任务 · {_escape(task_status)}</span><h3>{_escape(task_title)}</h3><p>{_escape(accepted.get("content") or "尚未生成任务内容。")}</p></div><div class="mission-body"><div class="mission-result"><div><small>题量</small><strong>{_escape(task_result[0])}</strong></div><div><small>正确</small><strong>{_escape(task_result[1])}</strong></div><div><small>正确率</small><strong>{_escape(task_result[2])}</strong></div><div><small>实际用时</small><strong>{_escape(task_result[3])}</strong></div></div><ul class="evidence-list">{evidence_html}</ul></div></article><aside class="card next-action"><div class="stamp">下一步<br>建议</div><h3>{_escape(next_title)}</h3><p>{_escape(next_reason)}</p><div class="why">建议任务：{next_count}{'篇' if next_ability[0] == 'shenlun' else '题'} {_escape(next_ability[1])}，先补足长期样本；有实际用时就同时推进速度战线，没有也照常记录正确率。</div></aside></div><article class="card loop"><div class="section-title"><h3>一次练习怎样进入备考系统</h3><span class="muted">每一步都保留证据</span></div><div class="loop-track"><div class="loop-step done"><small>01</small><strong>规划任务</strong><p>根据当前弱点选训练内容</p></div><div class="loop-step done"><small>02</small><strong>提交练习</strong><p>任务、自主练习或全卷模拟</p></div><div class="loop-step done"><small>03</small><strong>分类记录</strong><p>题型、题量、正确数和用时</p></div><div class="loop-step done"><small>04</small><strong>更新诊断</strong><p>能力、技能、错题和申论</p></div><div class="loop-step current"><small>05</small><strong>即时结算</strong><p>纪录、成就、样本变化</p></div><div class="loop-step"><small>06</small><strong>安排下一步</strong><p>正确率优先或转入限时</p></div></div></article></section>
+  <section class="page" data-page="ability" hidden><div class="page-head"><div><p class="eyebrow">DIAGNOSIS / 双战线</p><h2>强项看段位，弱项也能看见进步</h2></div><p>11项能力分别计算正确率和速度。实力档位永久保留，成长成就只奖励互不重叠窗口之间的真实提升。</p></div><div class="ability-summary"><div class="card summary-card"><small>正确率已有样本</small><strong>{sampled_abilities}/11项</strong></div><div class="card summary-card"><small>速度已有样本</small><strong>{timed_abilities}/11项</strong></div><div class="card summary-card"><small>最接近补齐样本</small><strong>{_escape(next_ability[1])}</strong></div></div><div class="strength-grid">{strength_board}</div></section>
+  <section class="page" data-page="skills" hidden><div class="page-head"><div><p class="eyebrow">SKILL MAP / 学习覆盖</p><h2>解锁表示练过，不表示掌握</h2></div><p>70项标准技能永久保留。技能负责组织知识，能力分析负责判断历史表现。</p></div><details><summary>数据口径</summary><p>用户提交的日常练习、任务练习和全卷模拟均按原始题量、正确数与实际用时记录；缺少用时只参与正确率战线，不参与速度战线。</p></details><div class="filters">
     <button class="filter-btn active" data-filter="all">全部 {total}</button>
     <button class="filter-btn" data-filter="measured">有实测 {measured_skills}</button>
     <button class="filter-btn" data-filter="unmeasured">待记录 {total - measured_skills}</button><button class="filter-btn" data-filter="current">本赛季重点 {len(current_ids)}</button>
     <input id="skill-search" type="search" placeholder="搜索科目、模块或技能"></div>
     <div class="grid" id="skill-grid">{skills or _empty("技能目录尚未建立。完成季前校准后再生成总览。")}</div></section>
-  <section class="page" data-page="wrongs" hidden><h2>错题本</h2><p class="muted">一级分类固定为资料分析、数量关系、言语理解、判断推理、常识判断和申论。新题型只增加标签，不增加大类。</p><div class="wrong-controls"><select id="wrong-module"><option value="all">全部大类</option>{''.join(f'<option value="{_escape(name)}">{_escape(name)}</option>' for name in ('资料分析','数量关系','言语理解','判断推理','常识判断','申论'))}</select><select id="wrong-question"><option value="all">全部题目</option>{''.join(f'<option value="{_escape(item.get("wrong_id"))}" data-module="{_escape(item.get("module"))}">{_escape(item.get("question_ref") or item.get("wrong_id"))}</option>' for item in state.get('wrong_answers', []))}</select></div><div class="grid" id="wrong-grid">{wrongs or _empty("暂无错题记录。")}</div></section>
+  <section class="page" data-page="wrongs" hidden><div class="page-head"><div><p class="eyebrow">CORRECTION / 错因追踪</p><h2>错题保存题，易错点保存机制</h2></div><p>两者分开记录。错题负责订正和复测，易错点负责识别反复出现的错误模式。</p></div><p class="muted">一级分类固定为资料分析、数量关系、言语理解、判断推理、常识判断和申论。新题型只增加标签，不增加大类。</p><div class="wrong-controls"><select id="wrong-module"><option value="all">全部大类</option>{''.join(f'<option value="{_escape(name)}">{_escape(name)}</option>' for name in ('资料分析','数量关系','言语理解','判断推理','常识判断','申论'))}</select><select id="wrong-question"><option value="all">全部题目</option>{''.join(f'<option value="{_escape(item.get("wrong_id"))}" data-module="{_escape(item.get("module"))}">{_escape(item.get("question_ref") or item.get("wrong_id"))}</option>' for item in state.get('wrong_answers', []))}</select></div><div class="wrong-layout"><section><div class="section-title"><h3>错题本 · {len(state.get("wrong_answers", []))}题</h3></div><div class="grid" id="wrong-grid">{wrongs or _empty("暂无错题记录。")}</div></section><section><div class="section-title"><h3>易错点 · {len(state.get("error_hunts", []))}项</h3><span class="muted">{open_easy_points}项待处理</span></div><div class="grid">{easy_points or _empty("暂无易错点。")}</div></section></div></section>
   <section class="page" data-page="easy-points" hidden><h2>易错点</h2><div class="grid">{easy_points or _empty("暂无易错点。")}</div></section>
-  <section class="page" data-page="records" hidden><h2>练习战绩</h2><div class="record-controls"><label for="record-sort">排序</label><select id="record-sort"><option value="newest">日期从新到旧</option><option value="oldest">日期从旧到新</option><option value="accuracy-desc">正确率从高到低</option><option value="accuracy-asc">正确率从低到高</option><option value="type">按记录类型</option></select></div><div class="table-wrap"><table><thead><tr><th>日期</th><th>模块</th><th>正确题数</th><th>正确率</th><th>总用时</th><th>平均每题</th><th>用途</th></tr></thead><tbody id="practice-body">{practices or '<tr><td colspan="7">暂无练习战绩。</td></tr>'}</tbody></table></div><h2>段位定级</h2><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div>
-    <h2>战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>科目</th><th>范围</th><th>成绩</th><th>来源</th><th>用途</th></tr></thead><tbody>{assessments or '<tr><td colspan="6">暂无战绩。</td></tr>'}</tbody></table></div></section>
-  <section class="page" data-page="answers" hidden><h2>申论答题册</h2><div class="grid">{answers or _empty("暂无申论作答。")}</div></section>
-  <section class="page" data-page="medals" hidden><h2>成就墙</h2><div class="achievement-tabs"><button class="achievement-tab active" data-achievement="single"><strong>单次战绩</strong>25枚，可累计</button><button class="achievement-tab" data-achievement="strength"><strong>实力勋章</strong>11项双战线</button><button class="achievement-tab" data-achievement="growth"><strong>成长成就</strong>奖励真实提升</button><button class="achievement-tab" data-achievement="career"><strong>生涯成就</strong>升星与里程碑</button><button class="achievement-tab" data-achievement="season"><strong>赛季成就</strong>本赛季进度</button></div><div class="achievement-page" data-achievement-page="single"><div class="grid">{single_medals}</div></div><div class="achievement-page" data-achievement-page="strength" hidden><p class="muted">每条战线五档。已获得档位永久保留，彩色代表已达成，红框标出下一档，灰色显示未来目标。</p><div class="strength-grid">{strength_board}</div></div><div class="achievement-page" data-achievement-page="growth" hidden><p class="muted">正确率提升5、10、15个百分点，速度提升10%、20%、30%。速度奖励要求正确率下降不超过5个百分点。</p><div class="grid">{growth_medals}</div></div><div class="achievement-page" data-achievement-page="career" hidden><div class="grid">{career_medals}</div></div><div class="achievement-page" data-achievement-page="season" hidden><div class="grid">{season_medals}</div></div></section>
+  <section class="page" data-page="records" hidden><div class="page-head"><div><p class="eyebrow">LEDGER / 原始账本</p><h2>练过什么，先如实记下来</h2></div><p>任务练习、自主练习和全卷模拟进入同一账本。缺少用时不会阻止保存正确率，但不能参与速度统计。</p></div><div class="record-controls"><label for="record-sort">当前共 {len(practice_records)} 条记录 · 排序</label><select id="record-sort"><option value="newest">日期从新到旧</option><option value="oldest">日期从旧到新</option><option value="accuracy-desc">正确率从高到低</option><option value="accuracy-asc">正确率从低到高</option><option value="type">按记录类型</option></select></div><div class="table-wrap"><table><thead><tr><th>日期</th><th>模块</th><th>正确题数</th><th>正确率</th><th>总用时</th><th>平均每题</th><th>用途</th></tr></thead><tbody id="practice-body">{practices or '<tr><td colspan="7">暂无练习战绩。</td></tr>'}</tbody></table></div></section>
+  <section class="page" data-page="answers" hidden><div class="page-head"><div><p class="eyebrow">SHENLUN / 作答档案</p><h2>原答案、评分和修改方向放在一起</h2></div><p>AI内部单题评分只用于训练反馈，不改变排位段位。完整外部评分另行入账。</p></div><div class="grid">{answers or _empty("暂无申论作答。")}</div></section>
+  <section class="page" data-page="rank" hidden><div class="page-head"><div><p class="eyebrow">RANK / 完整考试</p><h2>段位只看可比的全卷成绩</h2></div><p>日常专项练习更新能力，不直接改变段位；历史成绩只作为基线。</p></div><div class="rank-overview"><div class="rank-now"><span class="path">本赛季</span><strong>{_escape(rank)} {"★" * stars}</strong></div><div class="rank-stat"><span>上赛季</span><strong>{_escape(previous_rank)} {"★" * previous_stars}</strong></div><div class="rank-stat"><span>历史最高</span><strong>{_escape(highest_rank)}</strong></div><div class="rank-stat"><span>定级进度</span><strong>行测 {_escape(placement.get("xingce_current", 0))}/{_escape(placement.get("xingce_target", 2))} · 申论 {_escape(placement.get("shenlun_current", 0))}/{_escape(placement.get("shenlun_target", 2))}</strong></div></div><h2>模块与科目段位</h2><div class="grid">{rankings or _empty("本赛季有效样本不足，当前未定级。")}</div><h2>战绩</h2><div class="table-wrap"><table><thead><tr><th>日期</th><th>科目</th><th>范围</th><th>成绩</th><th>来源</th><th>用途</th></tr></thead><tbody>{assessments or '<tr><td colspan="6">暂无战绩。</td></tr>'}</tbody></table></div></section>
+  <section class="page" data-page="medals" hidden><div class="page-head"><div><p class="eyebrow">ACHIEVEMENTS / 五类反馈</p><h2>达标有勋章，变好也有奖励</h2></div><p>实力勋章证明达到过什么水平，成长成就记录从哪里提升上来；两者分开后，弱项不会长期空白。</p></div><div class="achievement-tabs"><button class="achievement-tab active" data-achievement="single"><strong>单次战绩</strong>25枚，可累计</button><button class="achievement-tab" data-achievement="strength"><strong>实力勋章</strong>11项双战线</button><button class="achievement-tab" data-achievement="growth"><strong>成长成就</strong>奖励真实提升</button><button class="achievement-tab" data-achievement="career"><strong>生涯成就</strong>升星与里程碑</button><button class="achievement-tab" data-achievement="season"><strong>赛季成就</strong>本赛季进度</button></div><div class="achievement-page" data-achievement-page="single"><div class="grid">{single_medals}</div></div><div class="achievement-page" data-achievement-page="strength" hidden><p class="muted">每条战线五档。已获得档位永久保留，彩色代表已达成，红框标出下一档，灰色显示未来目标。</p><div class="strength-grid">{strength_board}</div></div><div class="achievement-page" data-achievement-page="growth" hidden><p class="muted">正确率提升5、10、15个百分点，速度提升10%、20%、30%。速度奖励要求正确率下降不超过5个百分点。</p><div class="grid">{growth_medals}</div></div><div class="achievement-page" data-achievement-page="career" hidden><div class="grid">{career_medals}</div></div><div class="achievement-page" data-achievement-page="season" hidden><div class="grid">{season_medals}</div></div></section>
 </main><script>
   const tabs=[...document.querySelectorAll('.tab-btn')]; const pages=[...document.querySelectorAll('.page')];
   function openTab(name){{tabs.forEach(x=>x.classList.toggle('active',x.dataset.tab===name));pages.forEach(page=>page.hidden=page.dataset.page!==name);}}

@@ -33,7 +33,7 @@ from scripts import dashboard, state_store
 
 
 class DashboardTests(unittest.TestCase):
-    def test_dashboard_shows_six_sections_and_skill_progress(self) -> None:
+    def test_dashboard_shows_full_loop_and_skill_progress(self) -> None:
         state = state_store.default_state("2026-08-29T00:00:00+00:00")
         first, second = state["catalog"][:2]
         state["season"]["locked_catalog_ids"] = [first["id"]]
@@ -118,7 +118,17 @@ class DashboardTests(unittest.TestCase):
             source_path=Path("state.json"),
         )
 
-        for section in ("技能总览", "错题本", "易错点", "战绩", "申论答题册", "勋章墙"):
+        for section in (
+            "今日任务",
+            "能力分析",
+            "技能地图",
+            "练习记录",
+            "错题本",
+            "易错点",
+            "申论答题本",
+            "战绩段位",
+            "成就墙",
+        ):
             self.assertIn(section, report)
         self.assertIn("有实测", report)
         self.assertIn("待记录", report)
